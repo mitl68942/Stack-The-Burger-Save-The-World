@@ -74,8 +74,8 @@ canvas {
   const canvas = document.getElementById('gameCanvas');
   const ctx = canvas.getContext('2d');
 
-  const GAME_W = 800;
-  const GAME_H = 600;
+  let GAME_W = 800;
+  let GAME_H = 600;
 
   let RECT_W = 70;
   let RECT_H = 22;
@@ -83,8 +83,8 @@ canvas {
   let OFFSET_DENOM = 35;
   const FALL_SPEED = 3.5;
   let LAYER_SPACING = 24;
-  const DRAGON_CATCH_Y = 420;
-  const GROUND_Y = 555;
+  let DRAGON_CATCH_Y = 420;
+  let GROUND_Y = 555;
   const SPAWN_Y = -50;
   const KEY_TAP_SPEED = 2;     // 单次点击步幅（小）
   const KEY_HOLD_SPEED = 7;    // 长按最大速度（快）
@@ -94,6 +94,13 @@ canvas {
   const TOTAL_RANDOM_INGREDIENTS = 35;
   const SPAWN_COOLDOWN = 0.8;
   const INGREDIENT_SCALE = 0.45;
+
+  // 石块袭击常量
+  const ROCK_SPAWN_MIN = 5;      // 最短间隔（秒）
+  const ROCK_SPAWN_MAX = 10;     // 最长间隔（秒）
+  const ROCK_MAX_COUNT = 3;      // 最大同时存在数
+  const ROCK_SPEED = 2.8;        // 下落速度（慢于食材 3.5）
+  const ROCK_SIZE = 22;          // 碰撞/视觉半径
 
   const INGREDIENT_TYPES = {
     bottom_bun:    { name: '汉堡底',    outer: '#D2691E', inner: '#F4A460', accent: '#8B4513', baseScore: 0,   width: 70 },
@@ -135,19 +142,20 @@ canvas {
   let particles = [];
   let floatingTexts = [];
 
+  // 石块袭击
+  let rocks = [];
+  let rockSpawnTimer = 0;
+  let rockLoseAnim = 0;      // 石块失败动画计时器
+  let rockHitX = 0;          // 石块命中位置
+  let rockHitY = 0;
+
   let winAnimTimer = 0;
   let dragonGlow = 0;
 
-  let audioCtx = null;
-  let audioEnabled = false;
-  let startSfx = null;
-  let monsterSound = null;
   let bgm = null;
-  let menuBgm = null;
   let laughSfx = null;
   let crySfx = null;
   let catchSfx = null;
-  let roarTimer = 0;
 
   let animFrameId = null;
   let lastTime = 0;
@@ -292,11 +300,16 @@ canvas {
     bgScrollY = 0;
     gameTimer = GAME_DURATION;
     spawnCooldown = 0;
-    roarTimer = 0;
     topBunSpawned = false;
     ingredientQueue = generateQueue();
     maxLayers = ingredientQueue.length + 1;
     totalLayers = 0;
+    // 石块袭击初始
+    rocks = [];
+    rockSpawnTimer = randomRockInterval();
+    rockLoseAnim = 0;
+    rockHitX = 0;
+    rockHitY = 0;
     spawnNextIngredient();
   }
 
@@ -313,7 +326,19 @@ canvas {
     }
 
     var margin = SPAWN_MARGIN;
-    var spawnX = margin + Math.random() * (GAME_W - margin * 2);
+    var spawnX;
+    var safeDist = ROCK_SIZE + RECT_W + 20;
+    var tries = 0;
+    do {
+      spawnX = margin + Math.random() * (GAME_W - margin * 2);
+      // 不与其他石块重合
+      var ok2 = true;
+      for (var r2 = 0; r2 < rocks.length && ok2; r2++) {
+        if (Math.abs(spawnX - rocks[r2].x) < safeDist) ok2 = false;
+      }
+      if (ok2) break;
+      tries++;
+    } while (tries < 20);
     // 确保食材生成在塔顶上方至少3层间距的位置，防止塔高时出生即失败
     var towerTopY = getTowerTopCenter().y;
     var spawnY = Math.min(-50 - cameraY, towerTopY - LAYER_SPACING * 3);
@@ -325,6 +350,232 @@ canvas {
     };
     spawnCooldown = SPAWN_COOLDOWN;
   }
+
+  // ──────── 石块袭击 ────────
+  function randomRockInterval() {
+    return ROCK_SPAWN_MIN + Math.random() * (ROCK_SPAWN_MAX - ROCK_SPAWN_MIN);
+  }
+
+  function spawnRock() {
+    if (rocks.length >= ROCK_MAX_COUNT) return;
+    var margin = ROCK_SIZE + 20;
+    var x;
+    var safeDist = ROCK_SIZE + RECT_W + 20;
+    var tries = 0;
+    do {
+      x = margin + Math.random() * (GAME_W - margin * 2);
+      // 不与当前食材重合
+      var ok = true;
+      if (currentIngredient && currentIngredient.active) {
+        if (Math.abs(x - currentIngredient.x) < safeDist) ok = false;
+      }
+      // 不与其他石块重合
+      for (var r = 0; r < rocks.length && ok; r++) {
+        if (Math.abs(x - rocks[r].x) < safeDist) ok = false;
+      }
+      if (ok) break;
+      tries++;
+    } while (tries < 20);
+
+    // 石块生成在屏幕顶部（考虑相机偏移）
+    var spawnY = -60 - cameraY;
+
+    // 生成 6~8 个顶点的随机多边形
+    var vertexCount = 6 + Math.floor(Math.random() * 3);
+    var vertices = [];
+    for (var i = 0; i < vertexCount; i++) {
+      var angle = (i / vertexCount) * Math.PI * 2;
+      var r = ROCK_SIZE * (0.65 + Math.random() * 0.35);
+      vertices.push({
+        cos: Math.cos(angle),
+        sin: Math.sin(angle),
+        r: r
+      });
+    }
+
+    rocks.push({
+      x: x,
+      y: spawnY,
+      vx: 0,
+      vy: ROCK_SPEED,
+      rotation: Math.random() * Math.PI * 2,
+      rotationSpeed: (Math.random() - 0.5) * 0.06,
+      active: true,
+      vertices: vertices,
+      cracks: generateCracks(),  // 预生成裂纹线
+      shadowOffset: 0
+    });
+  }
+
+  // 预生成几条随机裂纹（线段）
+  function generateCracks() {
+    var count = 2 + Math.floor(Math.random() * 3);
+    var cracks = [];
+    for (var i = 0; i < count; i++) {
+      var a1 = Math.random() * Math.PI * 2;
+      var a2 = a1 + (Math.random() - 0.5) * 0.8;
+      var r1 = ROCK_SIZE * (0.2 + Math.random() * 0.4);
+      var r2 = r1 + ROCK_SIZE * (0.15 + Math.random() * 0.3);
+      cracks.push({
+        x1: Math.cos(a1) * r1,
+        y1: Math.sin(a1) * r1,
+        x2: Math.cos(a2) * r2,
+        y2: Math.sin(a2) * r2
+      });
+    }
+    return cracks;
+  }
+
+  function triggerRockLose(hitX, hitY) {
+    state = 'lose';
+    loseReason = 'rock';
+    rockLoseAnim = 0;
+    rockHitX = (hitX != null) ? hitX : dragonX;
+    rockHitY = (hitY != null) ? hitY : DRAGON_CATCH_Y;
+    // 爆炸粒子
+    var explosionColors = ['#FF4444','#FF0000','#CC0000','#888','#555','#FF6600','#FF9900'];
+    spawnParticles(rockHitX, rockHitY, explosionColors, 40, 8);
+    shakeTimer = 1.2;
+    shakeIntensity = 18;
+    if (crySfx) { crySfx.currentTime = 0; crySfx.play().catch(function() {}); }
+  }
+
+  function updateRocks(dt) {
+    for (var i = rocks.length - 1; i >= 0; i--) {
+      var rock = rocks[i];
+      if (!rock.active) continue;
+
+      rock.y += rock.vy;
+      rock.rotation += rock.rotationSpeed;
+
+      // 移出屏幕底部 → 消失（无惩罚）
+      var groundY = GROUND_Y - cameraY;
+      if (rock.y > groundY + ROCK_SIZE * 2) {
+        rocks.splice(i, 1);
+        continue;
+      }
+
+      // 碰撞检测①：与奶龙（仅石块中心进入奶龙身体范围触发）
+      var dx = rock.x - dragonX;
+      var dy = rock.y - DRAGON_CATCH_Y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < ROCK_SIZE * 0.55 + RECT_W * 0.22) {
+        triggerRockLose(rock.x, rock.y);
+        return;
+      }
+
+      // 碰撞检测②：与塔顶汉堡层（石块视觉边缘碰到食材才触发）
+      var top = getTowerTopCenter();
+      var topX = dragonX + top.offsetX;
+      var topY = top.y;
+      var topW = getTopWidth();
+      var effRockR = ROCK_SIZE * 0.45;  // 使用石块内圈半径，贴合视觉
+      var dx2 = Math.abs(rock.x - topX);
+      var dy2 = Math.abs(rock.y - topY);
+      if (dx2 < topW / 2 + effRockR && dy2 < RECT_H / 2 + effRockR) {
+        triggerRockLose(rock.x, rock.y);
+        return;
+      }
+    }
+  }
+
+  function drawRocks() {
+    for (var i = 0; i < rocks.length; i++) {
+      var rock = rocks[i];
+      if (!rock.active) continue;
+
+      ctx.save();
+      ctx.translate(rock.x, rock.y);
+      ctx.rotate(rock.rotation);
+
+      // 阴影
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(0, ROCK_SIZE * 0.85, ROCK_SIZE * 0.6, ROCK_SIZE * 0.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 石块主体：灰黑色不规则多边形
+      var verts = rock.vertices;
+      ctx.beginPath();
+      ctx.moveTo(verts[0].cos * verts[0].r, verts[0].sin * verts[0].r);
+      for (var j = 1; j < verts.length; j++) {
+        ctx.lineTo(verts[j].cos * verts[j].r, verts[j].sin * verts[j].r);
+      }
+      ctx.closePath();
+
+      // 渐变填充（深灰）
+      var rockGrad = ctx.createLinearGradient(-ROCK_SIZE, -ROCK_SIZE, ROCK_SIZE * 0.5, ROCK_SIZE * 0.5);
+      rockGrad.addColorStop(0, '#6B6B6B');
+      rockGrad.addColorStop(0.4, '#4A4A4A');
+      rockGrad.addColorStop(0.7, '#3A3A3A');
+      rockGrad.addColorStop(1, '#2A2A2A');
+      ctx.fillStyle = rockGrad;
+      ctx.fill();
+
+      // 边缘（粗描边）
+      ctx.strokeStyle = '#222';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // 裂纹
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.lineWidth = 0.8;
+      for (var c = 0; c < rock.cracks.length; c++) {
+        var cr = rock.cracks[c];
+        ctx.beginPath();
+        ctx.moveTo(cr.x1, cr.y1);
+        ctx.lineTo(cr.x2, cr.y2);
+        ctx.stroke();
+      }
+
+      // 红色危险描边（微弱，帮助辨识）
+      ctx.strokeStyle = 'rgba(255,60,60,0.45)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(verts[0].cos * verts[0].r, verts[0].sin * verts[0].r);
+      for (var k = 1; k < verts.length; k++) {
+        ctx.lineTo(verts[k].cos * verts[k].r, verts[k].sin * verts[k].r);
+      }
+      ctx.closePath();
+      ctx.stroke();
+
+      // 几个小灰尘粒子绕石块边缘
+      ctx.fillStyle = 'rgba(180,180,180,0.6)';
+      for (var d = 0; d < 3; d++) {
+        var da = rock.rotation * 0.7 + d * 2.1 + Date.now() * 0.003;
+        var dr = ROCK_SIZE * 0.8;
+        ctx.beginPath();
+        ctx.arc(Math.cos(da) * dr, Math.sin(da) * dr, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+
+      // 地面落地预警指示器（垂直降落，精确显示落点位置）
+      var groundWorldY = GROUND_Y - cameraY;  // 世界坐标中的地面高度
+      var fallProgress = Math.max(0, Math.min(1, rock.y / Math.max(groundWorldY, 1)));
+      if (fallProgress > 0.15) {
+        var indicatorAlpha = 0.15 + fallProgress * 0.55;
+        var indicatorR = ROCK_SIZE * (0.9 + fallProgress * 0.5);
+        // 外圈（脉冲）
+        var pulse = 1 + Math.sin(Date.now() * 0.012 + i * 2.5) * 0.3;
+        ctx.globalAlpha = indicatorAlpha * 0.45;
+        ctx.strokeStyle = '#FF4444';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(rock.x, groundWorldY, indicatorR * pulse * 1.4, 0, Math.PI * 2);
+        ctx.stroke();
+        // 内圈（实心落点）
+        ctx.globalAlpha = indicatorAlpha * 0.65;
+        ctx.fillStyle = 'rgba(255,60,60,0.3)';
+        ctx.beginPath();
+        ctx.arc(rock.x, groundWorldY, indicatorR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+  // ──────── 石块袭击结束 ────────
 
   function getTowerTopCenter() {
     if (tower.length === 0) return { offsetX: 0, y: DRAGON_CATCH_Y };
@@ -432,23 +683,14 @@ canvas {
 
     if (ing.type === 'beef_patty') {
       spawnParticles(catchX, newY, ['#8B4513','#5C2E00','#6B3410','#CD853F'], 15, 3);
-      playSound('meat');
     } else if (ing.type === 'pineapple') {
       spawnParticles(catchX, newY, ['#FFD700','#FFFF00','#FFA500','#FFFACD'], 15, 3);
-      playSound('pineapple');
     } else if (ing.type === 'lettuce') {
       spawnParticles(catchX, newY, ['#228B22','#32CD32','#90EE90','#006400'], 12, 3);
-      playSound('catch');
     } else if (ing.type === 'cheese') {
       spawnParticles(catchX, newY, ['#FFA500','#FFD700','#FFEC8B','#FF8C00'], 12, 3);
-      playSound('catch');
     } else if (ing.type === 'top_bun') {
       spawnParticles(catchX, newY, ['#FFD700','#FFA500','#FFF','#FFE4B5','#FF69B4'], 30, 5);
-      playSound('win');
-    } else if (perfectCoef >= 90) {
-      playSound('perfect');
-    } else {
-      playSound('catch');
     }
 
     if (totalLayers >= 36) {
@@ -521,15 +763,6 @@ canvas {
         if (spawnCooldown < 0) spawnCooldown = 0;
       }
 
-      roarTimer += dt;
-      if (roarTimer >= 15 && monsterSound) {
-        roarTimer = 0;
-        try {
-          monsterSound.currentTime = 0;
-          monsterSound.play().catch(function() {});
-        } catch(e) {}
-      }
-
       if (mouseActive) {
         targetDragonX = mouseX;
         keyHoldTime = 0;
@@ -576,7 +809,6 @@ canvas {
             state = 'lose';
             loseReason = 'ground';
             if (crySfx) { crySfx.currentTime = 0; crySfx.play().catch(function() {}); }
-            playSound('lose');
           }
         }
       }
@@ -584,6 +816,22 @@ canvas {
       if (gameTimer <= 0 && !topBunSpawned && !currentIngredient && ingredientQueue.length === 0 && spawnCooldown <= 0) {
         spawnNextIngredient();
       }
+
+      // ──── 石块袭击逻辑 ────
+      // 计时生成石块
+      rockSpawnTimer -= dt;
+      if (rockSpawnTimer <= 0) {
+        spawnRock();
+        rockSpawnTimer = randomRockInterval();
+      }
+      // 更新石块
+      updateRocks(dt);
+      // ────────────────────────
+    }
+
+    // 石块失败动画计时
+    if (state === 'lose' && loseReason === 'rock') {
+      rockLoseAnim += dt;
     }
 
     if (state === 'win') {
@@ -659,7 +907,7 @@ canvas {
   function drawDragon() {
     ctx.save();
     var dx = dragonX;
-    var dy = 485;
+    var dy = Math.round(GAME_H * 0.808);
 
     if (state === 'win') {
       ctx.globalAlpha = dragonGlow;
@@ -846,258 +1094,122 @@ canvas {
   }
 
   function drawUI() {
-    var panelX = 10, panelY = 8, panelW = 240, panelH = 120;
+    var panelX = 10, panelY = 6, panelW = 240, panelH = 82;
 
-    // 面板背景 - 深色渐变
+    // ── 左侧面板背景 ──
     var panelGrad = ctx.createLinearGradient(panelX, panelY, panelX, panelY + panelH);
     panelGrad.addColorStop(0, 'rgba(25,12,45,0.94)');
     panelGrad.addColorStop(0.5, 'rgba(35,18,55,0.92)');
     panelGrad.addColorStop(1, 'rgba(20,10,38,0.94)');
     ctx.fillStyle = panelGrad;
-    ctx.beginPath();
-    ctx.roundRect(panelX, panelY, panelW, panelH, 12);
-    ctx.fill();
-
-    // 外发光边框
-    ctx.shadowColor = 'rgba(255,215,0,0.35)';
-    ctx.shadowBlur = 10;
-    ctx.strokeStyle = '#FFD700';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.roundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 11);
-    ctx.stroke();
+    ctx.beginPath(); ctx.roundRect(panelX, panelY, panelW, panelH, 10); ctx.fill();
+    ctx.shadowColor = 'rgba(255,215,0,0.35)'; ctx.shadowBlur = 8;
+    ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 9); ctx.stroke();
     ctx.shadowBlur = 0;
-
-    // 内边框装饰
-    ctx.strokeStyle = 'rgba(255,165,0,0.3)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(panelX + 6, panelY + 6, panelW - 12, panelH - 12, 9);
-    ctx.stroke();
-
-    // 标题行背景
-    ctx.fillStyle = 'rgba(255,215,0,0.08)';
-    ctx.beginPath();
-    ctx.roundRect(panelX + 6, panelY + 5, panelW - 12, 26, [9, 9, 0, 0]);
-    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,165,0,0.3)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(panelX + 6, panelY + 6, panelW - 12, panelH - 12, 7); ctx.stroke();
 
     // 分隔线
     ctx.strokeStyle = 'rgba(255,215,0,0.2)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(panelX + 14, panelY + 35);
-    ctx.lineTo(panelX + panelW - 14, panelY + 35);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(panelX + 14, panelY + 60);
-    ctx.lineTo(panelX + panelW - 14, panelY + 60);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(panelX + 14, panelY + 28); ctx.lineTo(panelX + panelW - 14, panelY + 28); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(panelX + 14, panelY + 50); ctx.lineTo(panelX + panelW - 14, panelY + 50); ctx.stroke();
 
-    // 第1行：得分
-    ctx.fillStyle = '#FFD700';
-    ctx.font = 'bold 16px "Microsoft YaHei"';
-    ctx.textAlign = 'left';
-    ctx.fillText('🏆 止战值', panelX + 14, panelY + 24);
+    // 第1行：止战值
+    ctx.fillStyle = '#FFD700'; ctx.font = 'bold 13px "Microsoft YaHei"'; ctx.textAlign = 'left';
+    ctx.fillText('🏆 止战值', panelX + 14, panelY + 20);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'right';
+    ctx.fillText(score, panelX + panelW - 14, panelY + 20);
 
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 16px "Microsoft YaHei"';
-    ctx.textAlign = 'right';
-    var scoreStr = score.toString();
-    ctx.fillText(scoreStr, panelX + panelW - 14, panelY + 24);
-
-    // 第2行：动荡值（带可视化指示器）
+    // 第2行：动荡值
     var instabColor = instability >= 3 ? '#FF4444' : (instability >= 2 ? '#FFA500' : '#00FF88');
-    ctx.fillStyle = '#AAA';
-    ctx.font = 'bold 12px "Microsoft YaHei"';
-    ctx.textAlign = 'left';
-    ctx.fillText('⚡ 动荡值', panelX + 14, panelY + 49);
+    ctx.fillStyle = '#AAA'; ctx.font = 'bold 11px "Microsoft YaHei"'; ctx.textAlign = 'left';
+    ctx.fillText('⚡ 动荡值', panelX + 14, panelY + 42);
 
-    // 动荡值可视化条
-    var instBarX = panelX + panelW - 90, instBarY = panelY + 39, instBarW = 76, instBarH = 14;
+    var instBarX = panelX + 75, instBarY = panelY + 33, instBarW = 60, instBarH = 10;
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
-    ctx.beginPath();
-    ctx.roundRect(instBarX, instBarY, instBarW, instBarH, 7);
-    ctx.fill();
-
+    ctx.beginPath(); ctx.roundRect(instBarX, instBarY, instBarW, instBarH, 5); ctx.fill();
     for (var i = 0; i < 3; i++) {
-      var segX = instBarX + 4 + i * 24;
-      var segW = 20;
+      var segX = instBarX + 3 + i * 19;
       ctx.fillStyle = i < instability ? instabColor : 'rgba(255,255,255,0.1)';
-      ctx.beginPath();
-      ctx.roundRect(segX, instBarY + 3, segW, instBarH - 6, 4);
-      ctx.fill();
-      // 选中段高光
+      ctx.beginPath(); ctx.roundRect(segX, instBarY + 2, 16, instBarH - 4, 3); ctx.fill();
       if (i < instability) {
         ctx.fillStyle = 'rgba(255,255,255,0.25)';
-        ctx.beginPath();
-        ctx.roundRect(segX, instBarY + 3, segW, (instBarH - 6) / 2, [4, 4, 0, 0]);
-        ctx.fill();
+        ctx.beginPath(); ctx.roundRect(segX, instBarY + 2, 16, (instBarH - 4) / 2, [3, 3, 0, 0]); ctx.fill();
       }
     }
 
     // 第3行：层数
-    ctx.fillStyle = '#AAA';
-    ctx.font = 'bold 12px "Microsoft YaHei"';
-    ctx.textAlign = 'left';
-    ctx.fillText('📊 层数', panelX + 14, panelY + 74);
+    var progress = totalLayers / Math.max(maxLayers, 1);
+    ctx.fillStyle = '#AAA'; ctx.font = 'bold 11px "Microsoft YaHei"'; ctx.textAlign = 'left';
+    ctx.fillText('📊 层数', panelX + 14, panelY + 62);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'right';
+    ctx.fillText(totalLayers + ' / ' + maxLayers, panelX + panelW - 14, panelY + 62);
 
-    var progress = totalLayers / maxLayers;
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 12px "Microsoft YaHei"';
-    ctx.textAlign = 'right';
-    ctx.fillText(totalLayers + ' / ' + maxLayers, panelX + panelW - 14, panelY + 74);
-
-    // 进度条
-    var progBarX = panelX + 14, progBarY = panelY + 83, progBarW = panelW - 28, progBarH = 8;
+    var progBarX = panelX + 14, progBarY = panelY + 67, progBarW = panelW - 28, progBarH = 6;
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.beginPath();
-    ctx.roundRect(progBarX, progBarY, progBarW, progBarH, 4);
-    ctx.fill();
+    ctx.beginPath(); ctx.roundRect(progBarX, progBarY, progBarW, progBarH, 3); ctx.fill();
     var progGrad = ctx.createLinearGradient(progBarX, progBarY, progBarX + progBarW, progBarY);
-    progGrad.addColorStop(0, '#FFD700');
-    progGrad.addColorStop(0.6, '#FF8C00');
-    progGrad.addColorStop(1, '#FF4444');
+    progGrad.addColorStop(0, '#FFD700'); progGrad.addColorStop(0.6, '#FF8C00'); progGrad.addColorStop(1, '#FF4444');
     ctx.fillStyle = progGrad;
-    ctx.beginPath();
-    ctx.roundRect(progBarX, progBarY, progBarW * Math.min(1, progress), progBarH, 4);
-    ctx.fill();
-    // 进度条高光
-    ctx.fillStyle = 'rgba(255,255,255,0.25)';
-    ctx.beginPath();
-    ctx.roundRect(progBarX, progBarY, progBarW * Math.min(1, progress), progBarH / 2, [4, 4, 0, 0]);
-    ctx.fill();
+    ctx.beginPath(); ctx.roundRect(progBarX, progBarY, progBarW * Math.min(1, progress), progBarH, 3); ctx.fill();
 
-    // 倒计时（在面板底部用简洁方式展示）
-    var secs = Math.ceil(gameTimer);
-    var timerColor = gameTimer <= 10 ? '#FF4444' : '#FFD700';
-    ctx.fillStyle = timerColor;
-    ctx.font = 'bold 11px "Microsoft YaHei"';
-    ctx.textAlign = 'center';
-    var timerPulse = gameTimer <= 10 ? 1 + Math.sin(Date.now() * 0.01) * 0.3 : 1;
-    ctx.globalAlpha = timerPulse;
-    ctx.fillText('💀 雷德王 ' + secs + 's 后降临', panelX + panelW / 2, panelY + panelH - 6);
-    ctx.globalAlpha = 1;
-
-    // 右侧：下一个物品预览（加长美化版）
-    var queueW = 175, queueH = 88, queueX = GAME_W - queueW - 12, queueY = 8;
-
-    // 面板背景 - 深色渐变
+    // ── 右侧面板：下一个食材预览 ──
+    var queueW = 150, queueH = 62, queueX = GAME_W - queueW - 8, queueY = 6;
     var queueGrad = ctx.createLinearGradient(queueX, queueY, queueX, queueY + queueH);
     queueGrad.addColorStop(0, 'rgba(25,12,45,0.92)');
     queueGrad.addColorStop(0.5, 'rgba(35,18,55,0.90)');
     queueGrad.addColorStop(1, 'rgba(20,10,38,0.92)');
     ctx.fillStyle = queueGrad;
-    ctx.beginPath();
-    ctx.roundRect(queueX, queueY, queueW, queueH, 12);
-    ctx.fill();
-
-    // 外发光边框
-    ctx.shadowColor = 'rgba(255,215,0,0.4)';
-    ctx.shadowBlur = 8;
-    ctx.strokeStyle = '#FFD700';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.roundRect(queueX + 1, queueY + 1, queueW - 2, queueH - 2, 11);
-    ctx.stroke();
+    ctx.beginPath(); ctx.roundRect(queueX, queueY, queueW, queueH, 10); ctx.fill();
+    ctx.shadowColor = 'rgba(255,215,0,0.4)'; ctx.shadowBlur = 6;
+    ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(queueX + 1, queueY + 1, queueW - 2, queueH - 2, 9); ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // 内边框装饰
-    ctx.strokeStyle = 'rgba(255,165,0,0.35)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(queueX + 6, queueY + 6, queueW - 12, queueH - 12, 8);
-    ctx.stroke();
+    // 标题
+    ctx.fillStyle = '#FFD700'; ctx.font = 'bold 11px "Microsoft YaHei"'; ctx.textAlign = 'left';
+    ctx.fillText('📦 下一个食材', queueX + 12, queueY + 17);
+    ctx.strokeStyle = 'rgba(255,215,0,0.25)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(queueX + 12, queueY + 24); ctx.lineTo(queueX + queueW - 12, queueY + 24); ctx.stroke();
 
-    // 标题栏背景
-    var headerGrad = ctx.createLinearGradient(queueX, queueY, queueX, queueY + 30);
-    headerGrad.addColorStop(0, 'rgba(255,215,0,0.15)');
-    headerGrad.addColorStop(1, 'rgba(255,215,0,0.02)');
-    ctx.fillStyle = headerGrad;
-    ctx.beginPath();
-    ctx.roundRect(queueX + 6, queueY + 5, queueW - 12, 26, [8, 8, 0, 0]);
-    ctx.fill();
-
-    // 标题文字
-    ctx.fillStyle = '#FFD700';
-    ctx.font = 'bold 13px "Microsoft YaHei"';
-    ctx.textAlign = 'left';
-    ctx.fillText('📦 下一个食材', queueX + 14, queueY + 24);
-
-    // 标题下方分隔线
-    ctx.strokeStyle = 'rgba(255,215,0,0.25)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(queueX + 14, queueY + 33);
-    ctx.lineTo(queueX + queueW - 14, queueY + 33);
-    ctx.stroke();
-
-    // 收集要预览的物品（最多4个）
+    // 预览物品（最多4个）
     var previewItems = [];
-    if (currentIngredient && currentIngredient.active) {
-      previewItems.push(currentIngredient.type);
-    }
-    for (var q = 0; q < ingredientQueue.length && previewItems.length < 4; q++) {
-      previewItems.push(ingredientQueue[q]);
-    }
+    if (currentIngredient && currentIngredient.active) previewItems.push(currentIngredient.type);
+    for (var q = 0; q < ingredientQueue.length && previewItems.length < 4; q++) previewItems.push(ingredientQueue[q]);
     var previewCount = Math.min(4, previewItems.length);
-    var previewAreaY = queueY + 42;
-    var previewAreaH = queueH - 48;
-
-    // 每个预览物品的卡片槽
-    var cardW = 35, cardH = 38;
-    var cardGap = 6;
+    var cardW = 28, cardH = 26, cardGap = 5;
     var totalCardsW = previewCount * cardW + (previewCount - 1) * cardGap;
     var cardsStartX = queueX + (queueW - totalCardsW) / 2;
+    var previewCenterY = queueY + 44;
 
     for (var p = 0; p < previewCount; p++) {
       var cx = cardsStartX + p * (cardW + cardGap) + cardW / 2;
-      var cy = previewAreaY + previewAreaH / 2;
-
-      // 每个物品的小卡片背景
-      var cardGrad = ctx.createLinearGradient(cx - cardW/2, cy - cardH/2, cx - cardW/2, cy + cardH/2);
-      cardGrad.addColorStop(0, 'rgba(50,30,70,0.7)');
-      cardGrad.addColorStop(1, 'rgba(30,15,45,0.7)');
-      ctx.fillStyle = cardGrad;
-      ctx.beginPath();
-      ctx.roundRect(cx - cardW/2, cy - cardH/2, cardW, cardH, 6);
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(255,215,0,0.3)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(cx - cardW/2, cy - cardH/2, cardW, cardH, 6);
-      ctx.stroke();
-
-      // 正在掉落中的物品高亮
+      ctx.fillStyle = 'rgba(30,15,45,0.7)';
+      ctx.beginPath(); ctx.roundRect(cx - cardW/2, previewCenterY - cardH/2, cardW, cardH, 5); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,215,0,0.3)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.roundRect(cx - cardW/2, previewCenterY - cardH/2, cardW, cardH, 5); ctx.stroke();
       if (p === 0 && currentIngredient && currentIngredient.active) {
         var pulse = 0.5 + Math.sin(Date.now() * 0.005) * 0.3;
-        ctx.strokeStyle = 'rgba(255,215,0,' + pulse + ')';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.roundRect(cx - cardW/2 - 1, cy - cardH/2 - 1, cardW + 2, cardH + 2, 7);
-        ctx.stroke();
+        ctx.strokeStyle = 'rgba(255,215,0,' + pulse + ')'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.roundRect(cx - cardW/2 - 1, previewCenterY - cardH/2 - 1, cardW + 2, cardH + 2, 6); ctx.stroke();
       }
-
-      // 绘制食材图标
-      drawIngredientShape(cx, cy, previewItems[p], 0.35);
-
-      // 小标签显示序号
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.beginPath();
-      ctx.roundRect(cx + cardW/2 - 13, cy - cardH/2 - 1, 14, 12, [0, 3, 0, 3]);
-      ctx.fill();
-      ctx.fillStyle = '#FFD700';
-      ctx.font = 'bold 7px "Microsoft YaHei"';
-      ctx.textAlign = 'center';
-      ctx.fillText('#' + (p + 1), cx + cardW/2 - 6, cy - cardH/2 + 9);
+      drawIngredientShape(cx, previewCenterY, previewItems[p], 0.28);
     }
-
-    // 没有物品时的占位提示
     if (previewCount === 0) {
-      ctx.fillStyle = 'rgba(255,255,255,0.4)';
-      ctx.font = '11px "Microsoft YaHei"';
-      ctx.textAlign = 'center';
-      ctx.fillText('等待中...', queueX + queueW / 2, previewAreaY + previewAreaH / 2 + 4);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '10px "Microsoft YaHei"'; ctx.textAlign = 'center';
+      ctx.fillText('等待中...', queueX + queueW / 2, previewCenterY + 3);
     }
+
+    // 倒计时（居中在两面板下方）
+    var secs = Math.ceil(gameTimer);
+    var timerColor = gameTimer <= 10 ? '#FF4444' : '#FFD700';
+    ctx.fillStyle = timerColor;
+    ctx.font = 'bold 12px "Microsoft YaHei"'; ctx.textAlign = 'center';
+    var timerPulse = gameTimer <= 10 ? 1 + Math.sin(Date.now() * 0.01) * 0.3 : 1;
+    ctx.globalAlpha = timerPulse;
+    ctx.fillText('💀 雷德王 ' + secs + 's 后降临', GAME_W / 2, panelY + panelH + 4);
+    ctx.globalAlpha = 1;
   }
 
   function drawLoadingScreen() {
@@ -1231,239 +1343,240 @@ canvas {
   let tutorialTouchStartScroll = 0;
 
   function drawTutorialScreen() {
-    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.fillStyle = 'rgba(0,0,0,0.88)';
     ctx.fillRect(0, 0, GAME_W, GAME_H);
 
     var now = Date.now() * 0.001;
 
-    // 关闭提示
     ctx.fillStyle = '#FF6B6B';
-    ctx.font = '14px "Microsoft YaHei"';
+    ctx.font = '13px "Microsoft YaHei"';
     ctx.textAlign = 'right';
-    ctx.fillText('✕ 点击任意位置关闭', GAME_W - 20, 30);
+    ctx.fillText('✕ 点击任意位置关闭', GAME_W - 20, 28);
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(20, 40, GAME_W - 40, GAME_H - 60);
+    ctx.rect(20, 36, GAME_W - 40, GAME_H - 56);
     ctx.clip();
 
-    var baseY = 60 - tutorialScrollY;
-    var lineH = 30;
-    var sectionGap = 20;
-    var col1 = '#FFD700';
-    var col2 = '#FFA500';
-    var col3 = '#87CEEB';
-    var col4 = '#98FB98';
-    var col5 = '#FF6B6B';
-    var col6 = '#DDA0DD';
-    var colWhite = '#FFFFFF';
-    var colCyan = '#00E5FF';
-    var colGreen = '#00FF88';
+    var baseY = 54 - tutorialScrollY;
+    var lh = 26, gap = 18;
+    var G = '#FFD700', O = '#FF8C00', B = '#87CEEB', GN = '#98FB98', R = '#FF6B6B', W = '#EEE', P = '#DDA0DD';
 
-    ctx.font = 'bold 22px "Microsoft YaHei"';
     ctx.textAlign = 'center';
+    ctx.fillStyle = G; ctx.font = 'bold 20px "Microsoft YaHei"';
+    ctx.fillText('🍔 《叠堡之怒：雷德王覆灭记》', GAME_W / 2, baseY); baseY += 36;
 
-    // 标题
-    ctx.fillStyle = col1;
-    ctx.fillText('🍔《叠堡之怒：雷德王覆灭记》操作指南', GAME_W / 2, baseY); baseY += 40;
+    // ═══ 故事背景 ═══
+    ctx.textAlign = 'left'; ctx.font = 'bold 15px "Microsoft YaHei"';
+    ctx.fillStyle = O; ctx.fillText('📖 故事背景', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = B;
+    ctx.fillText('雷德王正在突破大气层，向地面袭来！奶龙举起汉堡底胚，', 40, baseY); baseY += lh;
+    ctx.fillText('接住从天而降的食材，搭建汉堡塔，积蓄"止战之力"。', 40, baseY); baseY += lh;
+    ctx.fillStyle = G;
+    ctx.fillText('🔹 汉堡塔达到 36 层 + 止战值 ≥ 1000 → 奶龙觉醒，击退雷德王！', 40, baseY); baseY += gap;
 
-    // 🎯 游戏目标
-    ctx.font = 'bold 17px "Microsoft YaHei"';
+    // ═══ 操作 ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = O;
+    ctx.fillText('🕹️ 操作方式', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = W;
+    ctx.fillText('🖱️ 鼠标 / 手指左右拖动  —  奶龙跟随移动', 40, baseY); baseY += lh;
+    ctx.fillText('⌨️ A / ← 左移    D / → 右移', 40, baseY); baseY += lh;
+    ctx.fillStyle = B;
+    ctx.fillText('📱 支持横屏和竖屏，自动适配画面', 40, baseY); baseY += gap;
+
+    // ═══ 食材 ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = O;
+    ctx.fillText('🥬 食材一览（接住得分）', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = W;
+    ctx.fillText('🥩 牛肉肉饼 15分        🧀 芝士片 12分        🍍 菠萝 14分', 40, baseY); baseY += lh;
+    ctx.fillText('🍅 番茄片 11分          🥬 生菜 7分', 40, baseY); baseY += lh;
+    ctx.fillStyle = G;
+    ctx.fillText('🍞 汉堡顶 10分  —  最后一个食材，完成汉堡塔', 40, baseY); baseY += gap;
+
+    // ═══ 完美系数 ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = O;
+    ctx.fillText('⭐ 完美系数（0~100）', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"';
+    ctx.fillStyle = G;  ctx.fillText('85~100  Perfect   动荡 +0    得分 ×3', 40, baseY); baseY += lh;
+    ctx.fillStyle = GN; ctx.fillText('70~84   Good      动荡 +0    得分 ×2', 40, baseY); baseY += lh;
+    ctx.fillStyle = '#FFA500'; ctx.fillText('40~69   Shaky     动荡 +1', 40, baseY); baseY += lh;
+    ctx.fillStyle = '#FF4500'; ctx.fillText('0~39    Danger    动荡 +3    屏幕震动', 40, baseY); baseY += gap;
+
+    // ═══ 动荡值 ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = R;
+    ctx.fillText('⚡ 动荡值 · 核心机制', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = W;
+    ctx.fillText('初始 0，接歪食材会增加动荡。', 40, baseY); baseY += lh;
+    ctx.fillStyle = '#FF4500';
+    ctx.fillText('⚠️ 动荡值 ≥ 3 → 汉堡塔倒塌，立即失败！', 40, baseY); baseY += lh;
+    ctx.font = 'bold 13px "Microsoft YaHei"'; ctx.fillStyle = GN;
+    ctx.fillText('✨ 救命机制：连续 3 次 Good / Perfect → 动荡值清零！', 40, baseY); baseY += gap;
+
+    // ═══ 💀 石块袭击（新） ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = '#FF0000';
+    ctx.fillText('💀 雷德王石块袭击', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = W;
+    ctx.fillText('雷德王会从天上投掷石块！石块是灰黑色多边形，带红色描边。', 40, baseY); baseY += lh;
+    ctx.fillStyle = R;
+    ctx.fillText('🔴 石块碰到奶龙或砸中汉堡塔顶层 → 立即失败，地球沦陷！', 40, baseY); baseY += lh;
+    ctx.fillStyle = B;
+    ctx.fillText('🟢 石块落在地上 → 无惩罚，只是消失', 40, baseY); baseY += lh;
+    ctx.fillText('💡 每 5~10 秒出现一块，最多同时 3 块。垂直下落，地面有红色落点预警圈。', 40, baseY); baseY += lh;
+    ctx.fillText('⚠️ 石块与食材不会重叠，但会同时存在，需要分辨并躲开！', 40, baseY); baseY += gap;
+
+    // ═══ 失败条件 ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = R;
+    ctx.fillText('🚨 失败条件（任意一条即游戏结束）', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = W;
+    ctx.fillText('① 动荡值 ≥ 3 — 汉堡倒塌', 40, baseY); baseY += lh;
+    ctx.fillText('② 食材落地 — 未接住食材', 40, baseY); baseY += lh;
+    ctx.fillText('③ 止战值不足 — 36层但分 < 1000', 40, baseY); baseY += lh;
+    ctx.fillStyle = R;
+    ctx.fillText('④ 被石块砸中 — 奶龙或塔顶碰到石块', 40, baseY); baseY += gap;
+
+    // ═══ 胜利条件 ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = G;
+    ctx.fillText('🏆 胜利条件', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = GN;
+    ctx.fillText('✅ 汉堡塔达到 36 层       ✅ 止战值 ≥ 1000', 40, baseY); baseY += lh;
+    ctx.fillText('✅ 全程未被石块砸中', 40, baseY); baseY += gap;
+
+    // ═══ 界面 ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = O;
+    ctx.fillText('📊 界面说明', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = W;
+    ctx.fillText('左上角：止战值 / 动荡值 / 层数进度', 40, baseY); baseY += lh;
+    ctx.fillText('右上角：下一个食材预览', 40, baseY); baseY += lh;
+    ctx.fillText('顶部居中：雷德王降临倒计时', 40, baseY); baseY += gap;
+
+    // ═══ 技巧 ═══
+    ctx.font = 'bold 15px "Microsoft YaHei"'; ctx.fillStyle = P;
+    ctx.fillText('💡 通关技巧', 40, baseY); baseY += 28;
+    ctx.font = '13px "Microsoft YaHei"'; ctx.fillStyle = W;
+    ctx.fillText('1. 瞄准食材中心 — 偏移越小，完美系数越高', 40, baseY); baseY += lh;
+    ctx.fillText('2. 优先接高分配料 — 牛肉饼(15) > 菠萝(14) > 芝士(12)', 40, baseY); baseY += lh;
+    ctx.fillText('3. 动荡值 ≥ 2 时要格外小心，利用连击清空', 40, baseY); baseY += lh;
+    ctx.fillText('4. 石块从正上方垂直掉落，看准地面红色预警圈躲避', 40, baseY); baseY += lh;
+    ctx.fillText('5. 不要为了躲石块而漏接食材 — 两者需要平衡', 40, baseY); baseY += lh;
+    ctx.fillStyle = G;
+    ctx.fillText('🎯 堆得准比堆得快更重要！', 40, baseY); baseY += gap;
+
+    // ═══ 总结 ═══
+    ctx.font = 'bold 14px "Microsoft YaHei"'; ctx.fillStyle = G;
+    ctx.fillText('精准接住食材建塔，躲开雷德王的石块，36层+1000分=拯救地球！🌍✨', GAME_W / 2, baseY);
     ctx.textAlign = 'left';
-    ctx.fillStyle = col2;
-    ctx.fillText('🎯 游戏目标', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colWhite;
-    ctx.fillText('雷德王正突破大气层！', 40, baseY); baseY += lineH;
-    ctx.fillText('人类最后的希望，是奶龙和不断生长的汉堡塔。', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col3;
-    ctx.fillText('控制奶龙接住从天而降的食材，搭建汉堡、积蓄止战之力。', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col1;
-    ctx.fillText('当汉堡塔达到 36 层，且止战值 ≥ 1000 时，', 40, baseY); baseY += lineH;
-    ctx.fillText('奶龙觉醒力量，击退雷德王！', 40, baseY); baseY += sectionGap;
-
-    // 🕹️ 操作方式
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col2;
-    ctx.fillText('🕹️ 操作方式', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colWhite;
-    ctx.fillText('PC：鼠标左右移动 / A D / ← →', 40, baseY); baseY += lineH;
-    ctx.fillText('手机：手指左右拖动屏幕（奶龙跟随）', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col3;
-    ctx.fillText('💡 奶龙手中已举着汉堡底胚，直接开始堆叠。', 40, baseY); baseY += sectionGap;
-
-    // 🥬 食材一览
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col2;
-    ctx.fillText('🥬 食材一览（随机掉落）', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = col4;
-    ctx.fillText('🧀 芝士片 - 中       🥩 牛肉肉饼 - 高', 40, baseY); baseY += lineH;
-    ctx.fillText('🍍 菠萝 - 中         🍅 番茄片 - 中', 40, baseY); baseY += lineH;
-    ctx.fillText('🥬 生菜 - 低', 40, baseY); baseY += lineH;
-    ctx.fillText('🍞 汉堡顶 - 特殊（顶层）', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col3;
-    ctx.fillText('✅ 接住食材 → 加入汉堡塔 → 得分 + 计算完美系数', 40, baseY); baseY += sectionGap;
-
-    // ⭐ 完美系数
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col2;
-    ctx.fillText('⭐ 完美系数（0~100）', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colWhite;
-    ctx.fillText('越高越好，影响得分和汉堡稳定性。', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col1;
-    ctx.fillText('85~100  Perfect  不稳值 +0    得分倍率最高', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col4;
-    ctx.fillText('70~84   Good     不稳值 +0', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col5;
-    ctx.fillText('40~69   Shaky    不稳值 +1', 40, baseY); baseY += lineH;
-    ctx.fillStyle = '#FF4500';
-    ctx.fillText('0~39    Danger   不稳值 +3', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col3;
-    ctx.fillText('🎯 堆得高不如堆得准！', 40, baseY); baseY += sectionGap;
-
-    // ⚠️ 不稳值系统
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col5;
-    ctx.fillText('⚠️ 不稳值系统（核心失败机制）', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colWhite;
-    ctx.fillText('初始为 0，根据完美系数评级增加。', 40, baseY); baseY += lineH;
-    ctx.fillStyle = '#FF4500';
-    ctx.fillText('一旦 ≥ 3 → 汉堡倒塌，立即失败！', 40, baseY); baseY += lineH;
-    ctx.font = 'bold 15px "Microsoft YaHei"';
-    ctx.fillStyle = colGreen;
-    ctx.fillText('✨ 稳定连击（救命机制）', 40, baseY); baseY += lineH;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colWhite;
-    ctx.fillText('连续 3 次获得 Good 或 Perfect →', 40, baseY); baseY += lineH;
-    ctx.fillText('不稳值直接清零 → 触发金光特效 + 提示动画', 40, baseY); baseY += sectionGap;
-
-    // 🚨 失败条件
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col5;
-    ctx.fillText('🚨 失败条件（任意一条即失败）', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colWhite;
-    ctx.fillText('1. 汉堡倒塌：不稳值 ≥ 3', 40, baseY); baseY += lineH;
-    ctx.fillText('2. 食材落地：任何食材掉在地上未被接住', 40, baseY); baseY += lineH;
-    ctx.fillText('3. 止战值不足：汉堡达 36 层但止战值 < 1000', 40, baseY); baseY += sectionGap;
-
-    // 🏆 胜利条件
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col1;
-    ctx.fillText('🏆 胜利条件（必须同时满足）', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = col4;
-    ctx.fillText('✅ 汉堡塔达到 36 层', 40, baseY); baseY += lineH;
-    ctx.fillText('✅ 止战值 ≥ 1000', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col3;
-    ctx.fillText('🎉 胜利动画：汉堡塔完成 → 奶龙觉醒 →', 40, baseY); baseY += lineH;
-    ctx.fillText('止战之力释放 → 雷德王被击退 → 和平恢复', 40, baseY); baseY += sectionGap;
-
-    // 📊 游戏界面
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col2;
-    ctx.fillText('📊 游戏界面（顶部实时显示）', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colWhite;
-    ctx.fillText('当前层数 / 止战值 / 完美系数 / 动荡值 / 倒计时', 40, baseY); baseY += sectionGap;
-
-    // 💡 通关技巧
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col6;
-    ctx.fillText('💡 通关技巧', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colWhite;
-    ctx.fillText('1. 优先瞄准中心：偏移越小，完美系数越高', 40, baseY); baseY += lineH;
-    ctx.fillText('2. 牛肉肉饼基础分最高 → 快速提升止战值', 40, baseY); baseY += lineH;
-    ctx.fillText('3. 避免连续 shaky/danger：不稳值到 3 直接崩盘', 40, baseY); baseY += lineH;
-    ctx.fillText('4. 利用稳定连击：连续 3 次 Good+ 可清空不稳值', 40, baseY); baseY += lineH;
-    ctx.fillText('5. 目标不止 36 层：止战值必须 ≥1000，否则白堆', 40, baseY); baseY += sectionGap;
-
-    // 📌 一句话总结
-    ctx.font = 'bold 17px "Microsoft YaHei"';
-    ctx.fillStyle = col1;
-    ctx.fillText('📌 一句话总结', 40, baseY); baseY += 32;
-    ctx.font = '15px "Microsoft YaHei"';
-    ctx.fillStyle = colCyan;
-    ctx.fillText('控制奶龙精准接住每一片食材，让每层尽量与上一层中心重合；', 40, baseY); baseY += lineH;
-    ctx.fillText('连续精准可消除不稳值，不稳值≥3、食材落地或总分不足都会失败；', 40, baseY); baseY += lineH;
-    ctx.fillStyle = col1;
-    ctx.font = 'bold 16px "Microsoft YaHei"';
-    ctx.fillText('达到 36 层 + 总分≥1000 即可拯救地球！ 🌍✨', 40, baseY); baseY += 48;
+    baseY += 40;
 
     tutorialContentH = baseY + tutorialScrollY;
-
     ctx.restore();
 
-    // 滚动提示
-    if (tutorialContentH > GAME_H - 60) {
-      var scrollAlpha = 0.3 + Math.sin(now * 3) * 0.2;
-      ctx.globalAlpha = scrollAlpha;
-      ctx.fillStyle = '#fff';
-      ctx.font = '12px "Microsoft YaHei"';
-      ctx.textAlign = 'center';
-      ctx.fillText('⬆⬇ 滚动查看', GAME_W / 2, GAME_H - 15);
+    if (tutorialContentH > GAME_H - 56) {
+      var sa = 0.3 + Math.sin(now * 3) * 0.2;
+      ctx.globalAlpha = sa;
+      ctx.fillStyle = '#fff'; ctx.font = '11px "Microsoft YaHei"'; ctx.textAlign = 'center';
+      ctx.fillText('⬆⬇ 滚动查看', GAME_W / 2, GAME_H - 12);
       ctx.globalAlpha = 1;
     }
   }
 
   function drawLoseScreen() {
-    // 半透明遮罩
-    ctx.fillStyle = 'rgba(0,0,0,0.7)';
-    ctx.fillRect(0, 0, GAME_W, GAME_H);
+    var isRockLose = (loseReason === 'rock');
 
-    // 绘制失败图片
-    if (loseImg) {
-      var loseMaxW = 500;
-      var loseW = Math.min(loseImg.naturalWidth, loseMaxW);
-      var loseH = loseImg.naturalHeight * (loseW / loseImg.naturalWidth);
-      var loseX = GAME_W / 2 - loseW / 2;
-      var loseY = 60;
-      ctx.drawImage(loseImg, loseX, loseY, loseW, loseH);
+    // 石块失败 → 红色遮罩；普通失败 → 暗色遮罩
+    if (isRockLose) {
+      var redAlpha = Math.min(0.75, rockLoseAnim * 0.6);
+      ctx.fillStyle = 'rgba(80,0,0,' + redAlpha + ')';
+      ctx.fillRect(0, 0, GAME_W, GAME_H);
+
+      // 绘制失败图片（弹入动画）
+      if (rockLoseAnim > 0.15) {
+        var t2 = Math.min(1, (rockLoseAnim - 0.15) * 2.5);
+        var bounce2 = (1 - t2) * (1 - t2) * 40;
+        if (loseImg) {
+          var loseMaxW2 = 500;
+          var loseW2 = Math.min(loseImg.naturalWidth, loseMaxW2);
+          var loseH2 = loseImg.naturalHeight * (loseW2 / loseImg.naturalWidth);
+          var loseX2 = GAME_W / 2 - loseW2 / 2;
+          var loseY2 = 60 - bounce2;
+          ctx.drawImage(loseImg, loseX2, loseY2, loseW2, loseH2);
+        } else {
+          ctx.fillStyle = '#FF4444';
+          ctx.font = 'bold 40px "Microsoft YaHei"';
+          ctx.textAlign = 'center';
+          ctx.shadowColor = '#FF0000';
+          ctx.shadowBlur = 25;
+          ctx.fillText('失败！', GAME_W / 2, 160 - bounce2);
+          ctx.shadowBlur = 0;
+        }
+      }
+
+      // 止战值 + 失败原因
+      if (rockLoseAnim > 1.0) {
+        ctx.fillStyle = '#FFD700';
+        ctx.font = 'bold 24px "Microsoft YaHei"';
+        ctx.textAlign = 'center';
+        ctx.fillText('止战值: ' + score, GAME_W / 2, 270);
+        ctx.fillStyle = '#FF8888';
+        ctx.font = 'bold 16px "Microsoft YaHei"';
+        ctx.fillText('石块砸中了奶龙…雷德王的阴谋得逞了！', GAME_W / 2, 305);
+      }
+
+      // 按钮（延迟显示）
+      if (rockLoseAnim > 1.8) {
+        drawLoseButtons(375);
+      }
     } else {
-      ctx.fillStyle = '#FF4444';
-      ctx.font = 'bold 40px "Microsoft YaHei"';
+      // 原有普通失败界面
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0, 0, GAME_W, GAME_H);
+
+      if (loseImg) {
+        var loseMaxW = 500;
+        var loseW = Math.min(loseImg.naturalWidth, loseMaxW);
+        var loseH = loseImg.naturalHeight * (loseW / loseImg.naturalWidth);
+        var loseX = GAME_W / 2 - loseW / 2;
+        var loseY = 60;
+        ctx.drawImage(loseImg, loseX, loseY, loseW, loseH);
+      } else {
+        ctx.fillStyle = '#FF4444';
+        ctx.font = 'bold 40px "Microsoft YaHei"';
+        ctx.textAlign = 'center';
+        ctx.fillText('失败！', GAME_W / 2, 180);
+      }
+
+      ctx.fillStyle = '#FFD700';
+      ctx.font = 'bold 28px "Microsoft YaHei"';
       ctx.textAlign = 'center';
-      ctx.fillText('失败！', GAME_W / 2, 180);
+      ctx.fillText('止战值: ' + score, GAME_W / 2, 290);
+
+      ctx.fillStyle = '#FF6666';
+      ctx.font = 'bold 18px "Microsoft YaHei"';
+      if (loseReason === 'ground') {
+        ctx.fillText('叠堡失败，无法获得止战之力', GAME_W / 2, 325);
+      } else if (loseReason === 'instability') {
+        ctx.fillText('汉堡塔不稳倒塌，无法获得止战之力', GAME_W / 2, 325);
+      } else {
+        ctx.fillText('止战值不足1000，无法获得止战之力', GAME_W / 2, 325);
+      }
+
+      drawLoseButtons(355);
     }
+  }
 
-    // 失败原因 + 止战值
-    ctx.fillStyle = '#FFD700';
-    ctx.font = 'bold 28px "Microsoft YaHei"';
-    ctx.textAlign = 'center';
-    ctx.fillText('止战值: ' + score, GAME_W / 2, 290);
 
-    ctx.fillStyle = '#FF6666';
-    ctx.font = 'bold 18px "Microsoft YaHei"';
-    if (loseReason === 'ground') {
-      ctx.fillText('叠堡失败，无法获得止战之力', GAME_W / 2, 325);
-    } else if (loseReason === 'instability') {
-      ctx.fillText('汉堡塔不稳倒塌，无法获得止战之力', GAME_W / 2, 325);
-    } else {
-      ctx.fillText('止战值不足1000，无法获得止战之力', GAME_W / 2, 325);
-    }
-
-    // 绘制两个按钮
+  // 共用按钮绘制
+  function drawLoseButtons(btnY) {
     var btnW = 130;
     var btnH = 46;
     var gap = 40;
     var totalW = btnW * 2 + gap;
     var btnStartX = GAME_W / 2 - totalW / 2;
-    var btnY = 355;
 
-    // 重新挑战按钮
-    var retryX = btnStartX;
-    loseRetryRect = { x: retryX, y: btnY, w: btnW, h: btnH };
-    drawGameButton(retryX, btnY, btnW, btnH, '🔄', '重新挑战', '#FF8C00');
+    loseRetryRect = { x: btnStartX, y: btnY, w: btnW, h: btnH };
+    drawGameButton(btnStartX, btnY, btnW, btnH, '🔄', '重新挑战', '#FF8C00');
 
-    // 返回主页按钮
-    var homeX = btnStartX + btnW + gap;
-    loseHomeRect = { x: homeX, y: btnY, w: btnW, h: btnH };
-    drawGameButton(homeX, btnY, btnW, btnH, '🏠', '返回主页', '#555');
+    loseHomeRect = { x: btnStartX + btnW + gap, y: btnY, w: btnW, h: btnH };
+    drawGameButton(btnStartX + btnW + gap, btnY, btnW, btnH, '🏠', '返回主页', '#555');
   }
 
   function drawWinScreen() {
@@ -1573,6 +1686,7 @@ canvas {
     drawDragon();
     drawTower();
     drawFallingIngredient();
+    drawRocks();
     drawParticles();
 
     ctx.restore();
@@ -1597,14 +1711,6 @@ canvas {
   }
 
   function initAudio() {
-    if (!startSfx) {
-      startSfx = new Audio('Humburger(2).mp3');
-      startSfx.load();
-    }
-    if (!monsterSound) {
-      monsterSound = new Audio('怪物叫声(2).mp3');
-      monsterSound.load();
-    }
     if (!bgm) {
       bgm = new Audio('bgm(3).mp3');
       bgm.loop = true;
@@ -1623,29 +1729,10 @@ canvas {
       catchSfx = new Audio('掉落音效(1).mp3');
       catchSfx.load();
     }
-    if (!menuBgm) {
-      menuBgm = new Audio('主菜单bgm.mp3');
-      menuBgm.loop = true;
-      menuBgm.volume = 0.5;
-      menuBgm.load();
-    }
-    if (audioCtx) return;
-    try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      audioEnabled = true;
-    } catch(e) {
-      audioEnabled = false;
-    }
-  }
-
-  function playSound(type) {
-    // 已由MP3音效替代，原合成音效禁用
   }
 
   function goHome() {
-    // 停止游戏BGM，切换为主菜单BGM
     if (bgm) { bgm.pause(); bgm.currentTime = 0; }
-    if (menuBgm) { menuBgm.currentTime = 0; menuBgm.play().catch(function() {}); }
     state = 'ready';
     score = 0;
     instability = 0;
@@ -1670,6 +1757,9 @@ canvas {
     totalLayers = 0;
     maxLayers = 0;
     ingredientQueue = [];
+    rocks = [];
+    rockSpawnTimer = 0;
+    rockLoseAnim = 0;
     lastTime = 0;
     resetResultRects();
   }
@@ -1683,8 +1773,6 @@ canvas {
 
   function restartGame() {
     initAudio();
-    // 停止主菜单BGM，播放游戏BGM
-    if (menuBgm) { menuBgm.pause(); menuBgm.currentTime = 0; }
     if (bgm) { bgm.currentTime = 0; bgm.play().catch(function() {}); }
     initGame();
     lastTime = 0;
@@ -1693,14 +1781,6 @@ canvas {
 
   function startGame() {
     initAudio();
-    // 停止主菜单BGM
-    if (menuBgm) { menuBgm.pause(); menuBgm.currentTime = 0; }
-    // 播放开始游戏音效
-    if (startSfx) {
-      startSfx.currentTime = 0;
-      startSfx.play().catch(function() {});
-    }
-    // 播放游戏BGM
     if (bgm) { bgm.currentTime = 0; bgm.play().catch(function() {}); }
     initGame();
     lastTime = 0;
@@ -1710,11 +1790,33 @@ canvas {
     var container = document.getElementById('game-container');
     var cw = container.clientWidth;
     var ch = container.clientHeight;
+    var aspect = cw / Math.max(ch, 1);
+
+    // 根据屏幕方向自动选择内部画布分辨率
+    if (aspect >= 0.95) {
+      // 横屏或近似方形：使用标准 800×600
+      GAME_W = 800;
+      GAME_H = 600;
+    } else {
+      // 竖屏：使用竖屏友好分辨率
+      GAME_H = 800;
+      GAME_W = Math.round(600 * aspect);
+      GAME_W = Math.max(380, Math.min(GAME_W, 600));
+    }
+
+    // 重新计算布局相关常量（按比例）
+    DRAGON_CATCH_Y = Math.round(GAME_H * 0.70);
+    GROUND_Y       = Math.round(GAME_H * 0.925);
+
     var scale = Math.min(cw / GAME_W, ch / GAME_H);
-    canvas.style.width = (GAME_W * scale) + 'px';
+    canvas.style.width  = (GAME_W * scale) + 'px';
     canvas.style.height = (GAME_H * scale) + 'px';
-    canvas.width = GAME_W;
+    canvas.width  = GAME_W;
     canvas.height = GAME_H;
+
+    // 旋转屏幕后重新 clamp 龙的位置，防止超出新画布范围
+    dragonX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, dragonX));
+    targetDragonX = dragonX;
   }
 
   canvas.addEventListener('mousemove', function(e) {
@@ -1735,10 +1837,6 @@ canvas {
 
   canvas.addEventListener('mousedown', function(e) {
     initAudio();
-    // 首次交互解锁音频并播放主菜单BGM
-    if (state === 'ready' && menuBgm && menuBgm.paused) {
-      menuBgm.play().catch(function() {});
-    }
     var rect = canvas.getBoundingClientRect();
     var scaleX = GAME_W / rect.width;
     var scaleY = GAME_H / rect.height;
@@ -1802,10 +1900,6 @@ canvas {
   canvas.addEventListener('touchstart', function(e) {
     e.preventDefault();
     initAudio();
-    // 首次交互解锁音频并播放主菜单BGM
-    if (state === 'ready' && menuBgm && menuBgm.paused) {
-      menuBgm.play().catch(function() {});
-    }
     var touch = e.touches[0];
     var rect = canvas.getBoundingClientRect();
     var scaleX = GAME_W / rect.width;
@@ -1901,10 +1995,6 @@ canvas {
 
   document.addEventListener('keydown', function(e) {
     initAudio();
-    // 首次交互解锁音频并播放主菜单BGM
-    if (state === 'ready' && menuBgm && menuBgm.paused) {
-      menuBgm.play().catch(function() {});
-    }
     keysDown[e.code] = true;
     if (state === 'tutorial') {
       state = 'ready';
