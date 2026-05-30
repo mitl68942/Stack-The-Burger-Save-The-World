@@ -76,30 +76,35 @@ canvas {
 
   let GAME_W = 800;
   let GAME_H = 600;
+  let CANVAS_MARGIN_X = 0;     // 16:9 侧边空白区宽度（手机端>0，桌面端=0）
+  let CANVAS_TOTAL_W = 800;    // 画布总宽度 = GAME_W + 2*CANVAS_MARGIN_X
 
   let RECT_W = 70;
   let RECT_H = 22;
   let COLLISION_R = 38;
   let OFFSET_DENOM = 35;
-  const FALL_SPEED = 3.5;
+  let FALL_SPEED = 3.5;         // 食材降落速度（手机端会加速）
   let LAYER_SPACING = 24;
   let DRAGON_CATCH_Y = 420;
   let GROUND_Y = 555;
   const SPAWN_Y = -50;
-  const KEY_TAP_SPEED = 2;     // 单次点击步幅（小）
-  const KEY_HOLD_SPEED = 7;    // 长按最大速度（快）
-  const KEY_RAMP_TIME = 0.18;  // 加速过渡时间（秒）
+  const KEY_TAP_SPEED = 2;     // 键盘单击步幅
+  const KEY_HOLD_SPEED = 7;    // 键盘长按最大速度
+  const KEY_RAMP_TIME = 0.18;  // 键盘加速过渡时间
+  const TOUCH_TAP_SPEED = 6;   // 触屏起步速度
+  const TOUCH_HOLD_SPEED = 14; // 触屏长按最大速度
+  const TOUCH_RAMP_TIME = 0.08; // 触屏加速过渡时间
   let SPAWN_MARGIN = 100;
   const GAME_DURATION = 45;
   const TOTAL_RANDOM_INGREDIENTS = 35;
-  const SPAWN_COOLDOWN = 0.8;
+  let SPAWN_COOLDOWN = 0.8;     // 食材生成间隔（手机端会缩短）
   const INGREDIENT_SCALE = 0.45;
 
   // 石块袭击常量
   const ROCK_SPAWN_MIN = 5;      // 最短间隔（秒）
   const ROCK_SPAWN_MAX = 10;     // 最长间隔（秒）
   const ROCK_MAX_COUNT = 3;      // 最大同时存在数
-  const ROCK_SPEED = 2.8;        // 下落速度（慢于食材 3.5）
+  let ROCK_SPEED = 2.8;         // 石块下落速度（手机端会加速）
   const ROCK_SIZE = 22;          // 碰撞/视觉半径
 
   const INGREDIENT_TYPES = {
@@ -133,6 +138,18 @@ canvas {
   let mouseX = GAME_W / 2;
   let keyHoldTime = 0;
   let currentKeyDir = 0;
+
+  // 手机端左右移动按键
+  let ignoreMouse = false;       // 触摸操作时不响应模拟鼠标事件
+  let touchBtnActive = false;
+  let touchBtnDir = 0;
+  let touchLeftActive = false;
+  let touchRightActive = false;
+  let touchBtnHoldTime = 0;
+  let TOUCH_BTN_RADIUS = 42;
+  let touchBtnY = 480;
+  let touchBtnLeftX = 90;
+  let touchBtnRightX = 710;
 
   let shakeTimer = 0;
   let shakeIntensity = 0;
@@ -288,6 +305,12 @@ canvas {
     targetDragonX = GAME_W / 2;
     keyHoldTime = 0;
     currentKeyDir = 0;
+    ignoreMouse = false;
+    touchBtnActive = false;
+    touchBtnDir = 0;
+    touchLeftActive = false;
+    touchRightActive = false;
+    touchBtnHoldTime = 0;
     tower = [];
     particles = [];
     floatingTexts = [];
@@ -767,6 +790,15 @@ canvas {
         targetDragonX = mouseX;
         keyHoldTime = 0;
         currentKeyDir = 0;
+        touchBtnActive = false;
+        touchBtnHoldTime = 0;
+      } else if (touchBtnActive) {
+        currentKeyDir = touchBtnDir;
+        touchBtnHoldTime += dt;
+        var rampT = Math.min(1, touchBtnHoldTime / TOUCH_RAMP_TIME);
+        var speedT = TOUCH_TAP_SPEED + (TOUCH_HOLD_SPEED - TOUCH_TAP_SPEED) * rampT;
+        targetDragonX += touchBtnDir * speedT;
+        keyHoldTime = 0;
       } else if (keysDown['KeyA'] || keysDown['ArrowLeft']) {
         currentKeyDir = -1;
         keyHoldTime += dt;
@@ -782,17 +814,17 @@ canvas {
       } else {
         keyHoldTime = 0;
         currentKeyDir = 0;
+        touchBtnHoldTime = 0;
       }
       targetDragonX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, targetDragonX));
       dragonX += (targetDragonX - dragonX) * 0.3;
       if (Math.abs(targetDragonX - dragonX) < 0.5) dragonX = targetDragonX;
 
       if (!currentIngredient && spawnCooldown <= 0) {
-        // 计时结束：清空队列，强制只出汉堡顶
-        if (gameTimer <= 0 && !topBunSpawned) {
-          ingredientQueue = [];
+        // 汉堡顶一定是最后一个：先耗尽所有随机食材，再出汉堡顶
+        if (ingredientQueue.length > 0) {
           spawnNextIngredient();
-        } else if (ingredientQueue.length > 0 && gameTimer > 0) {
+        } else if (!topBunSpawned) {
           spawnNextIngredient();
         }
       }
@@ -811,10 +843,6 @@ canvas {
             if (crySfx) { crySfx.currentTime = 0; crySfx.play().catch(function() {}); }
           }
         }
-      }
-
-      if (gameTimer <= 0 && !topBunSpawned && !currentIngredient && ingredientQueue.length === 0 && spawnCooldown <= 0) {
-        spawnNextIngredient();
       }
 
       // ──── 石块袭击逻辑 ────
@@ -1212,6 +1240,47 @@ canvas {
     ctx.globalAlpha = 1;
   }
 
+
+
+  function drawTouchButtons() {
+    var lAlpha = touchLeftActive ? 0.55 : 0.25;
+    var rAlpha = touchRightActive ? 0.55 : 0.25;
+    var btnR = TOUCH_BTN_RADIUS;
+    drawTouchBtn(touchBtnLeftX, touchBtnY, btnR, lAlpha, false);
+    drawTouchBtn(touchBtnRightX, touchBtnY, btnR, rAlpha, true);
+  }
+
+  function drawTouchBtn(x, y, r, alpha, isRight) {
+    ctx.save();
+    ctx.shadowColor = 'rgba(255,255,255,' + (alpha * 0.5) + ')';
+    ctx.shadowBlur = 12;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.globalAlpha = alpha * 1.4;
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    var arrSize = r * 0.35;
+    if (isRight) {
+      ctx.moveTo(x - arrSize * 0.6, y - arrSize);
+      ctx.lineTo(x + arrSize * 0.8, y);
+      ctx.lineTo(x - arrSize * 0.6, y + arrSize);
+    } else {
+      ctx.moveTo(x + arrSize * 0.6, y - arrSize);
+      ctx.lineTo(x - arrSize * 0.8, y);
+      ctx.lineTo(x + arrSize * 0.6, y + arrSize);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
   function drawLoadingScreen() {
     ctx.fillStyle = '#1a0a2e';
     ctx.fillRect(0, 0, GAME_W, GAME_H);
@@ -1339,6 +1408,7 @@ canvas {
 
   let tutorialScrollY = 0;
   let tutorialContentH = 0;
+  let tutorialCloseRect = { x: 0, y: 0, w: 0, h: 0 };
   let tutorialTouchStartY = 0;
   let tutorialTouchStartScroll = 0;
 
@@ -1348,14 +1418,22 @@ canvas {
 
     var now = Date.now() * 0.001;
 
+    // 关闭按钮（右上角）
+    var closeX = GAME_W - 46, closeY = 8, closeW = 36, closeH = 36;
+    tutorialCloseRect = { x: closeX, y: closeY, w: closeW, h: closeH };
+    ctx.fillStyle = 'rgba(255,107,107,0.2)';
+    ctx.beginPath();
+    ctx.arc(closeX + closeW/2, closeY + closeH/2, 18, 0, Math.PI * 2);
+    ctx.fill();
     ctx.fillStyle = '#FF6B6B';
-    ctx.font = '13px "Microsoft YaHei"';
-    ctx.textAlign = 'right';
-    ctx.fillText('✕ 点击任意位置关闭', GAME_W - 20, 28);
+    ctx.font = 'bold 20px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText('✕', closeX + closeW/2, closeY + closeH/2 + 7);
+    ctx.textAlign = 'left';
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(20, 36, GAME_W - 40, GAME_H - 56);
+    ctx.rect(20, 50, GAME_W - 40, GAME_H - 70);
     ctx.clip();
 
     var baseY = 54 - tutorialScrollY;
@@ -1470,7 +1548,7 @@ canvas {
     tutorialContentH = baseY + tutorialScrollY;
     ctx.restore();
 
-    if (tutorialContentH > GAME_H - 56) {
+    if (tutorialContentH > GAME_H - 70) {
       var sa = 0.3 + Math.sin(now * 3) * 0.2;
       ctx.globalAlpha = sa;
       ctx.fillStyle = '#fff'; ctx.font = '11px "Microsoft YaHei"'; ctx.textAlign = 'center';
@@ -1676,7 +1754,18 @@ canvas {
   }
 
   function render() {
-    ctx.clearRect(0, 0, GAME_W, GAME_H);
+    ctx.clearRect(0, 0, CANVAS_TOTAL_W, GAME_H);
+
+    // 手机端侧边栏背景
+    if (CANVAS_MARGIN_X > 0) {
+      ctx.fillStyle = '#111122';
+      ctx.fillRect(0, 0, CANVAS_MARGIN_X, GAME_H);
+      ctx.fillRect(CANVAS_MARGIN_X + GAME_W, 0, CANVAS_MARGIN_X, GAME_H);
+    }
+
+    // 游戏内容居中偏移
+    ctx.save();
+    ctx.translate(CANVAS_MARGIN_X, 0);
 
     drawBackground();
 
@@ -1698,6 +1787,11 @@ canvas {
     if (state === 'tutorial') drawTutorialScreen();
     if (state === 'lose') drawLoseScreen();
     if (state === 'win') drawWinScreen();
+
+    ctx.restore();
+
+    // 触屏按钮（画布坐标，不偏移）
+    if (state === 'playing') drawTouchButtons();
   }
 
   function gameLoop(timestamp) {
@@ -1741,6 +1835,13 @@ canvas {
     targetDragonX = GAME_W / 2;
     keyHoldTime = 0;
     currentKeyDir = 0;
+    touchBtnActive = false;
+    touchBtnDir = 0;
+    touchLeftActive = false;
+    touchRightActive = false;
+    touchLeftId = null;
+    touchRightId = null;
+    touchBtnHoldTime = 0;
     tower = [];
     particles = [];
     floatingTexts = [];
@@ -1792,55 +1893,89 @@ canvas {
     var ch = container.clientHeight;
     var aspect = cw / Math.max(ch, 1);
 
-    // 根据屏幕方向自动选择内部画布分辨率
+    // 手机端检测
+    var isMobile = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+
+    // 手机端加速降落
+    if (isMobile) {
+      FALL_SPEED = 7.0;
+      SPAWN_COOLDOWN = 0.4;
+      ROCK_SPEED = 4.5;
+    } else {
+      FALL_SPEED = 3.5;
+      SPAWN_COOLDOWN = 0.8;
+      ROCK_SPEED = 2.8;
+    }
+
+    // 根据屏幕方向选择分辨率
     if (aspect >= 0.95) {
-      // 横屏或近似方形：使用标准 800×600
       GAME_W = 800;
       GAME_H = 600;
+      if (isMobile) {
+        var desiredW = Math.round(GAME_H * 16 / 9);
+        CANVAS_MARGIN_X = Math.round((desiredW - GAME_W) / 2);
+      } else {
+        CANVAS_MARGIN_X = 0;
+      }
     } else {
-      // 竖屏：使用竖屏友好分辨率
       GAME_H = 800;
       GAME_W = Math.round(600 * aspect);
       GAME_W = Math.max(380, Math.min(GAME_W, 600));
+      CANVAS_MARGIN_X = 0;
     }
+    CANVAS_TOTAL_W = GAME_W + 2 * CANVAS_MARGIN_X;
 
-    // 重新计算布局相关常量（按比例）
+    // 重新计算布局相关常量
     DRAGON_CATCH_Y = Math.round(GAME_H * 0.70);
     GROUND_Y       = Math.round(GAME_H * 0.925);
 
-    var scale = Math.min(cw / GAME_W, ch / GAME_H);
-    canvas.style.width  = (GAME_W * scale) + 'px';
+    // 触屏按钮位置
+    if (CANVAS_MARGIN_X > 0) {
+      TOUCH_BTN_RADIUS = Math.round(CANVAS_MARGIN_X * 0.42);
+      touchBtnLeftX = Math.round(CANVAS_MARGIN_X / 2);
+      touchBtnRightX = Math.round(CANVAS_TOTAL_W - CANVAS_MARGIN_X / 2);
+      touchBtnY = Math.round(GAME_H * 0.50);
+    } else {
+      TOUCH_BTN_RADIUS = 42;
+      touchBtnY = Math.round(GAME_H * 0.82);
+      touchBtnLeftX = Math.round(GAME_W * 0.15);
+      touchBtnRightX = Math.round(GAME_W * 0.85);
+    }
+
+    var scale = Math.min(cw / CANVAS_TOTAL_W, ch / GAME_H);
+    canvas.style.width  = (CANVAS_TOTAL_W * scale) + 'px';
     canvas.style.height = (GAME_H * scale) + 'px';
-    canvas.width  = GAME_W;
+    canvas.width  = CANVAS_TOTAL_W;
     canvas.height = GAME_H;
 
-    // 旋转屏幕后重新 clamp 龙的位置，防止超出新画布范围
+    // clamp 龙位置
     dragonX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, dragonX));
     targetDragonX = dragonX;
   }
 
   canvas.addEventListener('mousemove', function(e) {
     if (state !== 'playing') return;
+    if (ignoreMouse) return;  // 触摸操作时忽略模拟鼠标事件
     mouseActive = true;
     var rect = canvas.getBoundingClientRect();
-    var scaleX = GAME_W / rect.width;
-    mouseX = (e.clientX - rect.left) * scaleX;
+    var scaleX = CANVAS_TOTAL_W / rect.width;
+    mouseX = (e.clientX - rect.left) * scaleX - CANVAS_MARGIN_X;
     mouseX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, mouseX));
   });
 
   canvas.addEventListener('wheel', function(e) {
     if (state === 'tutorial') {
       e.preventDefault();
-      tutorialScrollY = Math.max(0, Math.min(tutorialContentH - GAME_H + 60, tutorialScrollY + e.deltaY));
+      tutorialScrollY = Math.max(0, Math.min(tutorialContentH - GAME_H + 70, tutorialScrollY + e.deltaY));
     }
   });
 
   canvas.addEventListener('mousedown', function(e) {
     initAudio();
     var rect = canvas.getBoundingClientRect();
-    var scaleX = GAME_W / rect.width;
+    var scaleX = CANVAS_TOTAL_W / rect.width;
     var scaleY = GAME_H / rect.height;
-    var mx = (e.clientX - rect.left) * scaleX;
+    var mx = (e.clientX - rect.left) * scaleX - CANVAS_MARGIN_X;
     var my = (e.clientY - rect.top) * scaleY;
 
     if (state === 'ready') {
@@ -1856,7 +1991,11 @@ canvas {
     }
 
     if (state === 'tutorial') {
-      state = 'ready';
+      // 仅点击右上角✕关闭按钮才退出
+      if (mx >= tutorialCloseRect.x && mx <= tutorialCloseRect.x + tutorialCloseRect.w &&
+          my >= tutorialCloseRect.y && my <= tutorialCloseRect.y + tutorialCloseRect.h) {
+        state = 'ready';
+      }
       return;
     }
 
@@ -1902,12 +2041,12 @@ canvas {
     initAudio();
     var touch = e.touches[0];
     var rect = canvas.getBoundingClientRect();
-    var scaleX = GAME_W / rect.width;
+    var scaleX = CANVAS_TOTAL_W / rect.width;
     var scaleY = GAME_H / rect.height;
 
     if (state === 'ready') {
       if (touch) {
-        var mx = (touch.clientX - rect.left) * scaleX;
+        var mx = (touch.clientX - rect.left) * scaleX - CANVAS_MARGIN_X;
         var my = (touch.clientY - rect.top) * scaleY;
         if (mx >= startBtnRect.x && mx <= startBtnRect.x + startBtnRect.w &&
             my >= startBtnRect.y && my <= startBtnRect.y + startBtnRect.h) {
@@ -1922,13 +2061,25 @@ canvas {
     }
 
     if (state === 'tutorial') {
-      state = 'ready';
+      if (touch) {
+        var tmx = (touch.clientX - rect.left) * scaleX - CANVAS_MARGIN_X;
+        var tmy = (touch.clientY - rect.top) * scaleY;
+        // 仅点击右上角✕关闭按钮才退出
+        if (tmx >= tutorialCloseRect.x && tmx <= tutorialCloseRect.x + tutorialCloseRect.w &&
+            tmy >= tutorialCloseRect.y && tmy <= tutorialCloseRect.y + tutorialCloseRect.h) {
+          state = 'ready';
+          return;
+        }
+        // 否则记录滚动起始位置
+        tutorialTouchStartY = touch.clientY;
+        tutorialTouchStartScroll = tutorialScrollY;
+      }
       return;
     }
 
     if (state === 'lose') {
       if (touch) {
-        var mx2 = (touch.clientX - rect.left) * scaleX;
+        var mx2 = (touch.clientX - rect.left) * scaleX - CANVAS_MARGIN_X;
         var my2 = (touch.clientY - rect.top) * scaleY;
         if (mx2 >= loseRetryRect.x && mx2 <= loseRetryRect.x + loseRetryRect.w &&
             my2 >= loseRetryRect.y && my2 <= loseRetryRect.y + loseRetryRect.h) {
@@ -1944,7 +2095,7 @@ canvas {
 
     if (state === 'win' && winAnimTimer > 1.5) {
       if (touch) {
-        var mx3 = (touch.clientX - rect.left) * scaleX;
+        var mx3 = (touch.clientX - rect.left) * scaleX - CANVAS_MARGIN_X;
         var my3 = (touch.clientY - rect.top) * scaleY;
         if (mx3 >= winRetryRect.x && mx3 <= winRetryRect.x + winRetryRect.w &&
             my3 >= winRetryRect.y && my3 <= winRetryRect.y + winRetryRect.h) {
@@ -1958,16 +2109,31 @@ canvas {
       return;
     }
 
-    if (state === 'tutorial' && touch) {
-      tutorialTouchStartY = touch.clientY;
-      tutorialTouchStartScroll = tutorialScrollY;
-      return;
-    }
-
-    if (touch && state === 'playing') {
-      mouseActive = true;
-      mouseX = (touch.clientX - rect.left) * scaleX;
-      mouseX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, mouseX));
+    if (state === 'playing') {
+      ignoreMouse = true;
+      touchLeftActive = false;
+      touchRightActive = false;
+      for (var ti = 0; ti < e.touches.length; ti++) {
+        var tt = e.touches[ti];
+        var ttx = (tt.clientX - rect.left) * scaleX;
+        var tty = (tt.clientY - rect.top) * scaleY;
+        var dl = Math.sqrt((ttx - touchBtnLeftX) * (ttx - touchBtnLeftX) + (tty - touchBtnY) * (tty - touchBtnY));
+        var dr = Math.sqrt((ttx - touchBtnRightX) * (ttx - touchBtnRightX) + (tty - touchBtnY) * (tty - touchBtnY));
+        if (dl < TOUCH_BTN_RADIUS) touchLeftActive = true;
+        if (dr < TOUCH_BTN_RADIUS) touchRightActive = true;
+      }
+      if (touchLeftActive && !touchRightActive) {
+        touchBtnDir = -1;
+        touchBtnActive = true;
+        mouseActive = false;
+      } else if (touchRightActive && !touchLeftActive) {
+        touchBtnDir = 1;
+        touchBtnActive = true;
+        mouseActive = false;
+      } else {
+        touchBtnActive = false;
+        touchBtnHoldTime = 0;
+      }
     }
   }, { passive: false });
 
@@ -1976,30 +2142,79 @@ canvas {
     var touch = e.touches[0];
     if (state === 'tutorial' && touch) {
       var deltaY = tutorialTouchStartY - touch.clientY;
-      tutorialScrollY = Math.max(0, Math.min(tutorialContentH - GAME_H + 60, tutorialTouchStartScroll + deltaY));
+      tutorialScrollY = Math.max(0, Math.min(tutorialContentH - GAME_H + 70, tutorialTouchStartScroll + deltaY));
       return;
     }
-    if (touch && state === 'playing') {
-      mouseActive = true;
-      var rect = canvas.getBoundingClientRect();
-      var scaleX = GAME_W / rect.width;
-      mouseX = (touch.clientX - rect.left) * scaleX;
-      mouseX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, mouseX));
+    if (state === 'playing') {
+      touchLeftActive = false;
+      touchRightActive = false;
+      var rect2 = canvas.getBoundingClientRect();
+      var sX2 = CANVAS_TOTAL_W / rect2.width;
+      var sY2 = GAME_H / rect2.height;
+      for (var ti2 = 0; ti2 < e.touches.length; ti2++) {
+        var tt2 = e.touches[ti2];
+        var ttx2 = (tt2.clientX - rect2.left) * sX2;
+        var tty2 = (tt2.clientY - rect2.top) * sY2;
+        var dl2 = Math.sqrt((ttx2 - touchBtnLeftX) * (ttx2 - touchBtnLeftX) + (tty2 - touchBtnY) * (tty2 - touchBtnY));
+        var dr2 = Math.sqrt((ttx2 - touchBtnRightX) * (ttx2 - touchBtnRightX) + (tty2 - touchBtnY) * (tty2 - touchBtnY));
+        if (dl2 < TOUCH_BTN_RADIUS) touchLeftActive = true;
+        if (dr2 < TOUCH_BTN_RADIUS) touchRightActive = true;
+      }
+      if (touchLeftActive && !touchRightActive) {
+        touchBtnDir = -1;
+        touchBtnActive = true;
+        mouseActive = false;
+      } else if (touchRightActive && !touchLeftActive) {
+        touchBtnDir = 1;
+        touchBtnActive = true;
+        mouseActive = false;
+      } else {
+        touchBtnActive = false;
+        touchBtnHoldTime = 0;
+      }
     }
   }, { passive: false });
 
   canvas.addEventListener('touchend', function(e) {
     e.preventDefault();
-    mouseActive = false;
+    if (state === 'playing') {
+      touchLeftActive = false;
+      touchRightActive = false;
+      var rect3 = canvas.getBoundingClientRect();
+      var sX3 = CANVAS_TOTAL_W / rect3.width;
+      var sY3 = GAME_H / rect3.height;
+      for (var ti3 = 0; ti3 < e.touches.length; ti3++) {
+        var tt3 = e.touches[ti3];
+        var ttx3 = (tt3.clientX - rect3.left) * sX3;
+        var tty3 = (tt3.clientY - rect3.top) * sY3;
+        var dl3 = Math.sqrt((ttx3 - touchBtnLeftX) * (ttx3 - touchBtnLeftX) + (tty3 - touchBtnY) * (tty3 - touchBtnY));
+        var dr3 = Math.sqrt((ttx3 - touchBtnRightX) * (ttx3 - touchBtnRightX) + (tty3 - touchBtnY) * (tty3 - touchBtnY));
+        if (dl3 < TOUCH_BTN_RADIUS) touchLeftActive = true;
+        if (dr3 < TOUCH_BTN_RADIUS) touchRightActive = true;
+      }
+      if (touchLeftActive && !touchRightActive) {
+        touchBtnDir = -1;
+        touchBtnActive = true;
+        mouseActive = false;
+      } else if (touchRightActive && !touchLeftActive) {
+        touchBtnDir = 1;
+        touchBtnActive = true;
+        mouseActive = false;
+      } else {
+        touchBtnActive = false;
+        touchBtnHoldTime = 0;
+      }
+      // 所有手指离开后，恢复鼠标响应
+      if (e.touches.length === 0) ignoreMouse = false;
+    } else {
+      mouseActive = false;
+    }
   });
 
   document.addEventListener('keydown', function(e) {
     initAudio();
     keysDown[e.code] = true;
-    if (state === 'tutorial') {
-      state = 'ready';
-      return;
-    }
+    if (state === 'tutorial') return;  // 教程中键盘不退出，仅关闭按钮可退出
     if (state === 'ready') startGame();
     if (e.code === 'KeyR') {
       if (state === 'lose') restartGame();
@@ -2007,6 +2222,8 @@ canvas {
     }
     if (e.code === 'KeyA' || e.code === 'ArrowLeft' || e.code === 'KeyD' || e.code === 'ArrowRight') {
       mouseActive = false;
+      touchBtnActive = false;
+      touchBtnHoldTime = 0;
     }
   });
 
@@ -2021,7 +2238,7 @@ canvas {
   window.addEventListener('resize', resizeCanvas);
 
   resizeCanvas();
-  canvas.width = GAME_W;
+  canvas.width = CANVAS_TOTAL_W;
   canvas.height = GAME_H;
   animFrameId = requestAnimationFrame(gameLoop);
 
