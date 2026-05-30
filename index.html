@@ -1,0 +1,1951 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>叠堡之怒：雷德王覆灭记</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #1a0a2e;
+  font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#game-container {
+  width: 100%; height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+canvas {
+  display: block;
+  image-rendering: auto;
+}
+#error-overlay {
+  display: none;
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.85); color: #fff; z-index: 9999;
+  flex-direction: column; align-items: center; justify-content: center;
+  font-size: 18px; text-align: center; padding: 20px;
+}
+#error-overlay .err-icon { font-size: 48px; margin-bottom: 16px; }
+#error-overlay .err-msg { color: #ff6b6b; margin-bottom: 8px; }
+#error-overlay .err-hint { color: #ccc; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="gameCanvas"></canvas>
+</div>
+<div id="error-overlay">
+  <div class="err-icon">😵</div>
+  <div class="err-msg">哎呀，出错了，请重启试试吧~</div>
+  <div class="err-hint" id="err-detail"></div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  try {
+
+  if (!CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+      if (typeof r === 'number') r = { tl: r, tr: r, br: r, bl: r };
+      this.beginPath();
+      this.moveTo(x + r.tl, y);
+      this.lineTo(x + w - r.tr, y);
+      this.quadraticCurveTo(x + w, y, x + w, y + r.tr);
+      this.lineTo(x + w, y + h - r.br);
+      this.quadraticCurveTo(x + w, y + h, x + w - r.br, y + h);
+      this.lineTo(x + r.bl, y + h);
+      this.quadraticCurveTo(x, y + h, x, y + h - r.bl);
+      this.lineTo(x, y + r.tl);
+      this.quadraticCurveTo(x, y, x + r.tl, y);
+      this.closePath();
+    };
+  }
+
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  const GAME_W = 800;
+  const GAME_H = 600;
+
+  let RECT_W = 70;
+  let RECT_H = 22;
+  let COLLISION_R = 38;
+  let OFFSET_DENOM = 35;
+  const FALL_SPEED = 3.5;
+  let LAYER_SPACING = 24;
+  const DRAGON_CATCH_Y = 420;
+  const GROUND_Y = 555;
+  const SPAWN_Y = -50;
+  const KEY_TAP_SPEED = 2;     // 单次点击步幅（小）
+  const KEY_HOLD_SPEED = 7;    // 长按最大速度（快）
+  const KEY_RAMP_TIME = 0.18;  // 加速过渡时间（秒）
+  let SPAWN_MARGIN = 100;
+  const GAME_DURATION = 45;
+  const TOTAL_RANDOM_INGREDIENTS = 35;
+  const SPAWN_COOLDOWN = 0.8;
+  const INGREDIENT_SCALE = 0.45;
+
+  const INGREDIENT_TYPES = {
+    bottom_bun:    { name: '汉堡底',    outer: '#D2691E', inner: '#F4A460', accent: '#8B4513', baseScore: 0,   width: 70 },
+    pineapple:     { name: '菠萝',      outer: '#FFD700', inner: '#FFFACD', accent: '#E6A800', baseScore: 14,  width: 65 },
+    tomato:        { name: '番茄片',    outer: '#FF4444', inner: '#FF7777', accent: '#CC2222', baseScore: 11,  width: 70 },
+    top_bun:       { name: '汉堡顶',    outer: '#D2691E', inner: '#F4A460', accent: '#8B4513', baseScore: 10,  width: 100 },
+    beef_patty:    { name: '牛肉肉饼',  outer: '#5C2E00', inner: '#8B4513', accent: '#3E1A00', baseScore: 15,  width: 80 },
+    lettuce:       { name: '生菜',      outer: '#228B22', inner: '#32CD32', accent: '#1A6B1A', baseScore: 7,   width: 85 },
+    cheese:        { name: '芝士片',    outer: '#FFA500', inner: '#FFD700', accent: '#CC8400', baseScore: 12,  width: 70 }
+  };
+
+  const FALLING_TYPES = ['pineapple','tomato','beef_patty','lettuce','cheese'];
+
+  let state = 'loading';
+  let score = 0;
+  let instability = 0;
+  let consecutiveGood = 0;
+  let totalLayers = 0;
+  let maxLayers = 0;
+  let gameTimer = GAME_DURATION;
+  let spawnCooldown = 0;
+  let topBunSpawned = false;
+  let cameraY = 0;
+  let bgScrollY = 0;
+
+  let dragonX = GAME_W / 2;
+  let targetDragonX = GAME_W / 2;
+  let keysDown = {};
+  let mouseActive = false;
+  let mouseX = GAME_W / 2;
+  let keyHoldTime = 0;
+  let currentKeyDir = 0;
+
+  let shakeTimer = 0;
+  let shakeIntensity = 0;
+  let tower = [];
+  let ingredientQueue = [];
+  let currentIngredient = null;
+  let particles = [];
+  let floatingTexts = [];
+
+  let winAnimTimer = 0;
+  let dragonGlow = 0;
+
+  let audioCtx = null;
+  let audioEnabled = false;
+  let startSfx = null;
+  let monsterSound = null;
+  let bgm = null;
+  let menuBgm = null;
+  let laughSfx = null;
+  let crySfx = null;
+  let catchSfx = null;
+  let roarTimer = 0;
+
+  let animFrameId = null;
+  let lastTime = 0;
+  let loseReason = '';
+
+  let loadingProgress = 0;
+  let loadingTotal = 0;
+  let imagesLoaded = false;
+
+  const IMAGE_FILES = {
+    bottom_bun:    '汉堡底.png',
+    top_bun:       '汉堡顶.png',
+    pineapple:     '菠萝.png',
+    tomato:        '番茄片.png',
+    beef_patty:    '牛肉肉饼.png',
+    lettuce:       '生菜.png',
+    cheese:        '芝士片.png',
+    dragonNormal:  '奶龙.png',
+    background:    '游戏背景.jpg',
+    title_img:     '游戏标题.png',
+    start_btn_img: '开始游戏.png',
+    win_img:       '胜利.jpg',
+    lose_img:      '失败.jpg',
+    menu_bg:       '主菜单背景.jpg'
+  };
+
+  let ingredientImages = {};
+
+  let dragonNormalImg = null;
+  let backgroundImg = null;
+  let menuBgImg = null;
+  let titleImg = null;
+  let startBtnImg = null;
+  let winImg = null;
+  let loseImg = null;
+  let startBtnRect = { x: 0, y: 0, w: 0, h: 0 };
+  let tutorialRect = { x: 0, y: 0, w: 0, h: 0 };
+  let loseRetryRect = { x: 0, y: 0, w: 0, h: 0 };
+  let loseHomeRect = { x: 0, y: 0, w: 0, h: 0 };
+  let winRetryRect = { x: 0, y: 0, w: 0, h: 0 };
+  let winHomeRect = { x: 0, y: 0, w: 0, h: 0 };
+
+  function updateDimensionsFromImages() {
+    var firstKey = null;
+    for (var k in ingredientImages) { firstKey = k; break; }
+    if (firstKey) {
+      var entry = ingredientImages[firstKey];
+      RECT_W = Math.round(entry.w * INGREDIENT_SCALE);
+      RECT_H = Math.round(entry.h * INGREDIENT_SCALE);
+    }
+    COLLISION_R = Math.sqrt((RECT_W/2) * (RECT_W/2) + (RECT_H/2) * (RECT_H/2)) + 4;
+    OFFSET_DENOM = RECT_W / 2;
+    LAYER_SPACING = Math.round(RECT_H * 0.75);
+    SPAWN_MARGIN = RECT_W + 10;
+  }
+
+  function preloadImages() {
+    var keys = Object.keys(IMAGE_FILES);
+    loadingTotal = keys.length;
+    loadingProgress = 0;
+    for (var i = 0; i < keys.length; i++) {
+      (function(key) {
+        var img = new Image();
+        img.onload = function() {
+          loadingProgress++;
+          if (key === 'dragonNormal') {
+            dragonNormalImg = img;
+          } else if (key === 'background') {
+            backgroundImg = img;
+          } else if (key === 'menu_bg') {
+            menuBgImg = img;
+          } else if (key === 'title_img') {
+            titleImg = img;
+          } else if (key === 'start_btn_img') {
+            startBtnImg = img;
+          } else if (key === 'win_img') {
+            winImg = img;
+          } else if (key === 'lose_img') {
+            loseImg = img;
+          } else {
+            ingredientImages[key] = { img: img, w: img.naturalWidth, h: img.naturalHeight };
+          }
+          if (loadingProgress >= loadingTotal) {
+            imagesLoaded = true;
+            updateDimensionsFromImages();
+            state = 'ready';
+            initAudio();
+          }
+        };
+        img.onerror = function() {
+          loadingProgress++;
+          if (loadingProgress >= loadingTotal) {
+            imagesLoaded = true;
+            updateDimensionsFromImages();
+            state = 'ready';
+            initAudio();
+          }
+        };
+        img.src = IMAGE_FILES[key];
+      })(keys[i]);
+    }
+  }
+
+  preloadImages();
+
+  function shuffle(arr) {
+    var a = arr.slice();
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    return a;
+  }
+
+  function generateQueue() {
+    var count = TOTAL_RANDOM_INGREDIENTS;
+    var q = [];
+    for (var i = 0; i < count; i++) {
+      q.push(FALLING_TYPES[Math.floor(Math.random() * FALLING_TYPES.length)]);
+    }
+    return q;
+  }
+
+  function initGame() {
+    state = 'playing';
+    score = 0;
+    instability = 0;
+    consecutiveGood = 0;
+    dragonX = GAME_W / 2;
+    targetDragonX = GAME_W / 2;
+    keyHoldTime = 0;
+    currentKeyDir = 0;
+    tower = [];
+    particles = [];
+    floatingTexts = [];
+    shakeTimer = 0;
+    shakeIntensity = 0;
+    currentIngredient = null;
+    dragonGlow = 0;
+    winAnimTimer = 0;
+    cameraY = 0;
+    bgScrollY = 0;
+    gameTimer = GAME_DURATION;
+    spawnCooldown = 0;
+    roarTimer = 0;
+    topBunSpawned = false;
+    ingredientQueue = generateQueue();
+    maxLayers = ingredientQueue.length + 1;
+    totalLayers = 0;
+    spawnNextIngredient();
+  }
+
+  function spawnNextIngredient() {
+    if (ingredientQueue.length === 0 && topBunSpawned) return;
+    if (spawnCooldown > 0) return;
+
+    var typeKey;
+    if (ingredientQueue.length === 0) {
+      typeKey = 'top_bun';
+      topBunSpawned = true;
+    } else {
+      typeKey = ingredientQueue.shift();
+    }
+
+    var margin = SPAWN_MARGIN;
+    var spawnX = margin + Math.random() * (GAME_W - margin * 2);
+    // 确保食材生成在塔顶上方至少3层间距的位置，防止塔高时出生即失败
+    var towerTopY = getTowerTopCenter().y;
+    var spawnY = Math.min(-50 - cameraY, towerTopY - LAYER_SPACING * 3);
+    currentIngredient = {
+      type: typeKey,
+      x: spawnX,
+      y: spawnY,
+      active: true
+    };
+    spawnCooldown = SPAWN_COOLDOWN;
+  }
+
+  function getTowerTopCenter() {
+    if (tower.length === 0) return { offsetX: 0, y: DRAGON_CATCH_Y };
+    var top = tower[tower.length - 1];
+    return { offsetX: top.offsetX, y: top.y };
+  }
+
+  function spawnParticles(x, y, colors, count, spread) {
+    for (var i = 0; i < (count || 12); i++) {
+      var angle = Math.random() * Math.PI * 2;
+      var speed = (spread || 3) * (0.5 + Math.random());
+      particles.push({
+        x: x, y: y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 2,
+        life: 1,
+        decay: 0.015 + Math.random() * 0.03,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        size: 2 + Math.random() * 4
+      });
+    }
+  }
+
+  function spawnPerfectParticles(x, y) {
+    var rainbow = ['#FF0000','#FF7F00','#FFFF00','#00FF00','#0000FF','#4B0082','#9400D3'];
+    spawnParticles(x, y, rainbow, 20, 4);
+  }
+
+  function addFloatingText(x, y, text, color) {
+    floatingTexts.push({
+      x: x, y: y, text: text, color: color,
+      life: 1, decay: 0.02
+    });
+  }
+
+  function getTopWidth() {
+    if (tower.length === 0) return ingredientImages['bottom_bun'].w || 70;
+    var topType = tower[tower.length - 1].type;
+    return ingredientImages[topType].w || 70;
+  }
+
+  function catchIngredient() {
+    if (!currentIngredient || !currentIngredient.active) return;
+    if (catchSfx) { catchSfx.currentTime = 0; catchSfx.play().catch(function() {}); }
+    var ing = currentIngredient;
+    ing.active = false;
+
+    var catchX = ing.x;
+    var top = getTowerTopCenter();
+    var newY = top.y - LAYER_SPACING;
+    var topWidth = getTopWidth();
+    var halfWidth = topWidth / 2;
+
+    var offsetDiff = Math.abs(ing.x - (dragonX + top.offsetX));
+    var perfectCoef = 0;
+    if (offsetDiff < halfWidth) {
+      perfectCoef = Math.floor(100 * (1 - offsetDiff / halfWidth));
+    }
+
+    var baseScore = INGREDIENT_TYPES[ing.type].baseScore || 0;
+    var gainedScore = Math.round(baseScore * (1 + perfectCoef * 0.02));
+
+    score += gainedScore;
+    totalLayers++;
+
+    var instInc = 0;
+    if (perfectCoef >= 70) {
+      consecutiveGood++;
+      if (consecutiveGood >= 3) {
+        instability = 0;
+        consecutiveGood = 0;
+        addFloatingText(catchX, newY - 20, '稳!', '#00FF88');
+      }
+    } else if (perfectCoef >= 40) {
+      instInc = 1;
+      consecutiveGood = 0;
+    } else {
+      instInc = 3;
+      consecutiveGood = 0;
+      shakeTimer = 0.3;
+      shakeIntensity = 8;
+    }
+    instability += instInc;
+
+    if (instability >= 3) {
+      state = 'lose';
+      loseReason = 'instability';
+      shakeTimer = 1.0;
+      shakeIntensity = 15;
+      if (crySfx) { crySfx.currentTime = 0; crySfx.play().catch(function() {}); }
+      return;
+    }
+
+    if (gainedScore > 0) {
+      var gradeColor = perfectCoef >= 70 ? '#FFD700' : (perfectCoef >= 40 ? '#00FF00' : '#AAAAAA');
+      var gradeText = perfectCoef >= 70 ? '完美' : (perfectCoef >= 40 ? '良好' : '及格');
+      addFloatingText(catchX, newY - 20, gradeText, gradeColor);
+      addFloatingText(catchX + 30, newY - 10, '+' + gainedScore, '#fff');
+    }
+    if (perfectCoef >= 90) {
+      spawnPerfectParticles(catchX, newY);
+    }
+
+    tower.push({ offsetX: ing.x - dragonX, y: newY, type: ing.type });
+
+    if (ing.type === 'beef_patty') {
+      spawnParticles(catchX, newY, ['#8B4513','#5C2E00','#6B3410','#CD853F'], 15, 3);
+      playSound('meat');
+    } else if (ing.type === 'pineapple') {
+      spawnParticles(catchX, newY, ['#FFD700','#FFFF00','#FFA500','#FFFACD'], 15, 3);
+      playSound('pineapple');
+    } else if (ing.type === 'lettuce') {
+      spawnParticles(catchX, newY, ['#228B22','#32CD32','#90EE90','#006400'], 12, 3);
+      playSound('catch');
+    } else if (ing.type === 'cheese') {
+      spawnParticles(catchX, newY, ['#FFA500','#FFD700','#FFEC8B','#FF8C00'], 12, 3);
+      playSound('catch');
+    } else if (ing.type === 'top_bun') {
+      spawnParticles(catchX, newY, ['#FFD700','#FFA500','#FFF','#FFE4B5','#FF69B4'], 30, 5);
+      playSound('win');
+    } else if (perfectCoef >= 90) {
+      playSound('perfect');
+    } else {
+      playSound('catch');
+    }
+
+    if (totalLayers >= 36) {
+      // 止战值判定：不足1000则失败
+      if (score < 1000) {
+        state = 'lose';
+        loseReason = 'score';
+        if (crySfx) { crySfx.currentTime = 0; crySfx.play().catch(function() {}); }
+      } else {
+        state = 'win';
+        winAnimTimer = 0;
+        dragonGlow = 1;
+        // 止战值足够，真正胜利才播放笑声
+        if (laughSfx) { laughSfx.currentTime = 0; laughSfx.play().catch(function() {}); }
+      }
+      maxLayers = 36;
+    }
+
+    currentIngredient = null;
+    if (state === 'playing') {
+      spawnCooldown = SPAWN_COOLDOWN;
+    }
+  }
+
+  function checkCollision() {
+    if (!currentIngredient || !currentIngredient.active) return;
+    var ing = currentIngredient;
+    var top = getTowerTopCenter();
+    var topX = dragonX + top.offsetX;
+    var topY = top.y;
+    var dx = ing.x - topX;
+    var dy = ing.y - topY;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < COLLISION_R) {
+      catchIngredient();
+    }
+  }
+
+  function updateParticles(dt) {
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.15;
+      p.life -= p.decay;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+    for (var j = floatingTexts.length - 1; j >= 0; j--) {
+      var ft = floatingTexts[j];
+      ft.y -= 1.5;
+      ft.life -= ft.decay;
+      if (ft.life <= 0) floatingTexts.splice(j, 1);
+    }
+  }
+
+  function update(dt) {
+    if (state === 'ready') return;
+
+    if (shakeTimer > 0) {
+      shakeTimer -= dt;
+      if (shakeTimer < 0) shakeTimer = 0;
+    }
+
+    if (state === 'playing') {
+      gameTimer -= dt;
+      if (gameTimer < 0) gameTimer = 0;
+
+      if (spawnCooldown > 0) {
+        spawnCooldown -= dt;
+        if (spawnCooldown < 0) spawnCooldown = 0;
+      }
+
+      roarTimer += dt;
+      if (roarTimer >= 15 && monsterSound) {
+        roarTimer = 0;
+        try {
+          monsterSound.currentTime = 0;
+          monsterSound.play().catch(function() {});
+        } catch(e) {}
+      }
+
+      if (mouseActive) {
+        targetDragonX = mouseX;
+        keyHoldTime = 0;
+        currentKeyDir = 0;
+      } else if (keysDown['KeyA'] || keysDown['ArrowLeft']) {
+        currentKeyDir = -1;
+        keyHoldTime += dt;
+        var ramp = Math.min(1, keyHoldTime / KEY_RAMP_TIME);
+        var speed = KEY_TAP_SPEED + (KEY_HOLD_SPEED - KEY_TAP_SPEED) * ramp;
+        targetDragonX += currentKeyDir * speed;
+      } else if (keysDown['KeyD'] || keysDown['ArrowRight']) {
+        currentKeyDir = 1;
+        keyHoldTime += dt;
+        var ramp2 = Math.min(1, keyHoldTime / KEY_RAMP_TIME);
+        var speed2 = KEY_TAP_SPEED + (KEY_HOLD_SPEED - KEY_TAP_SPEED) * ramp2;
+        targetDragonX += currentKeyDir * speed2;
+      } else {
+        keyHoldTime = 0;
+        currentKeyDir = 0;
+      }
+      targetDragonX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, targetDragonX));
+      dragonX += (targetDragonX - dragonX) * 0.3;
+      if (Math.abs(targetDragonX - dragonX) < 0.5) dragonX = targetDragonX;
+
+      if (!currentIngredient && spawnCooldown <= 0) {
+        // 计时结束：清空队列，强制只出汉堡顶
+        if (gameTimer <= 0 && !topBunSpawned) {
+          ingredientQueue = [];
+          spawnNextIngredient();
+        } else if (ingredientQueue.length > 0 && gameTimer > 0) {
+          spawnNextIngredient();
+        }
+      }
+
+      if (currentIngredient && currentIngredient.active) {
+        currentIngredient.y += FALL_SPEED;
+        checkCollision();
+        if (currentIngredient && currentIngredient.active) {
+          var topCheck = getTowerTopCenter();
+          var topCheckY = topCheck.y + RECT_H / 2;
+          if (currentIngredient.y > topCheckY) {
+            currentIngredient.active = false;
+            currentIngredient = null;
+            state = 'lose';
+            loseReason = 'ground';
+            if (crySfx) { crySfx.currentTime = 0; crySfx.play().catch(function() {}); }
+            playSound('lose');
+          }
+        }
+      }
+
+      if (gameTimer <= 0 && !topBunSpawned && !currentIngredient && ingredientQueue.length === 0 && spawnCooldown <= 0) {
+        spawnNextIngredient();
+      }
+    }
+
+    if (state === 'win') {
+      winAnimTimer += dt;
+      dragonGlow = 1 + Math.sin(winAnimTimer * 3) * 0.3;
+    }
+
+    var targetCamY = Math.max(0, tower.length * LAYER_SPACING - 40);
+    cameraY += (targetCamY - cameraY) * 0.12;
+
+    if (backgroundImg) {
+      var bgScale = Math.max(GAME_W / backgroundImg.naturalWidth, GAME_H / backgroundImg.naturalHeight);
+      var bgDH = backgroundImg.naturalHeight * bgScale;
+      // 允许滚动到背景图最顶端
+      var maxBgScroll = Math.max(0, bgDH - GAME_H);
+      bgScrollY = Math.min(cameraY, maxBgScroll);
+    }
+
+    updateParticles(dt);
+  }
+
+  function drawBackground() {
+    if (backgroundImg) {
+      var imgW = backgroundImg.naturalWidth;
+      var imgH = backgroundImg.naturalHeight;
+      // cover模式：填满画面，随相机滚动
+      var scale = Math.max(GAME_W / imgW, GAME_H / imgH);
+      var dw = imgW * scale;
+      var dh = imgH * scale;
+      var maxOffset = dh - GAME_H;
+      if (maxOffset < 0) maxOffset = 0;
+      // bgScrollY从0→maxOffset，背景从底部→顶部
+      var bgOffset = maxOffset - bgScrollY;
+      bgOffset = Math.max(0, Math.min(maxOffset, bgOffset));
+      var dx = -(dw - GAME_W) / 2;
+      var dy = -bgOffset;
+      ctx.drawImage(backgroundImg, dx, dy, dw, dh);
+      return;
+    }
+
+    var grad = ctx.createLinearGradient(0, 0, 0, GAME_H);
+    grad.addColorStop(0, '#87CEEB');
+    grad.addColorStop(0.5, '#B0E0E6');
+    grad.addColorStop(0.85, '#90EE90');
+    grad.addColorStop(1, '#228B22');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+
+    ctx.fillStyle = '#228B22';
+    ctx.fillRect(0, GROUND_Y, GAME_W, GAME_H - GROUND_Y);
+
+    ctx.fillStyle = '#1a7a1a';
+    ctx.fillRect(0, GROUND_Y, GAME_W, 6);
+
+    for (var i = 0; i < 5; i++) {
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath();
+      var cx = 100 + i * 170 + Math.sin(Date.now() * 0.001 + i) * 20;
+      var cy = 80 + i * 30;
+      ctx.ellipse(cx, cy, 50 + i * 15, 15, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = '#87CEEB';
+    ctx.beginPath();
+    ctx.ellipse(120, 90, 60, 20, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(300, 60, 45, 15, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawDragon() {
+    ctx.save();
+    var dx = dragonX;
+    var dy = 485;
+
+    if (state === 'win') {
+      ctx.globalAlpha = dragonGlow;
+      ctx.shadowColor = '#FFD700';
+      ctx.shadowBlur = 20 + Math.sin(winAnimTimer * 5) * 10;
+    }
+
+    if (dragonNormalImg) {
+      var nW = RECT_W;
+      var nH = RECT_W * dragonNormalImg.naturalHeight / dragonNormalImg.naturalWidth;
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(dx, dy + 2, nW * 0.48, nH * 0.15, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.drawImage(dragonNormalImg, dx - nW/2, dy - nH/2, nW, nH);
+      ctx.restore();
+      return;
+    }
+
+    ctx.fillStyle = '#2E7D32';
+    ctx.beginPath();
+    ctx.ellipse(dx, dy + 32, 30, 10, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.ellipse(dx, dy, 28, 38, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#FFC107';
+    ctx.beginPath();
+    ctx.ellipse(dx - 2, dy - 5, 20, 28, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#FFF';
+    ctx.beginPath();
+    ctx.ellipse(dx - 8, dy - 18, 10, 13, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(dx + 8, dy - 18, 10, 13, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(dx - 6, dy - 16, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(dx + 10, dy - 16, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#FFF';
+    ctx.beginPath();
+    ctx.arc(dx - 5, dy - 18, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(dx + 11, dy - 18, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#FF8F00';
+    ctx.beginPath();
+    ctx.arc(dx, dy - 2, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = '#E65100';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(dx, dy + 2, 6, 0.2, Math.PI - 0.2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.ellipse(dx - 22, dy + 5, 6, 10, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(dx + 22, dy + 5, 6, 10, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    var handY = dy - 55;
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.ellipse(dx - 14, handY - 2, 4, 8, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(dx + 14, handY - 2, 4, 8, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = '#FFC107';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(dx - 18, dy - 30);
+    ctx.lineTo(dx - 14, handY + 4);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(dx + 18, dy - 30);
+    ctx.lineTo(dx + 14, handY + 4);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawBreadBase(x, y) {
+    var entry = ingredientImages['bottom_bun'];
+    if (!entry) return;
+    var w = RECT_W + 4, h = RECT_H + 6;
+    ctx.save();
+    ctx.drawImage(entry.img, x - w/2, y - h/2, w, h);
+    ctx.strokeStyle = '#8B4513';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(x - w/2 - 1, y - h/2 - 1, w + 2, h + 2, 8);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawIngredientShape(x, y, type, scale) {
+    scale = scale || 1;
+    var entry = ingredientImages[type];
+    if (!entry) {
+      var info = INGREDIENT_TYPES[type];
+      ctx.fillStyle = info.outer;
+      ctx.fillRect(x - RECT_W/2 * scale, y - RECT_H/2 * scale, RECT_W * scale, RECT_H * scale);
+      return;
+    }
+    var w = RECT_W * scale;
+    var h = RECT_H * scale;
+    ctx.drawImage(entry.img, x - w/2, y - h/2, w, h);
+  }
+
+  function drawTower() {
+    if (shakeTimer > 0 && state === 'playing') {
+      var sx = (Math.random() - 0.5) * shakeIntensity * (shakeTimer / 0.3);
+      var sy = (Math.random() - 0.5) * shakeIntensity * 0.5 * (shakeTimer / 0.3);
+      ctx.save();
+      ctx.translate(sx, sy);
+    }
+
+    var breadX = dragonX;
+    var breadY = DRAGON_CATCH_Y;
+    drawBreadBase(breadX, breadY);
+
+    for (var i = 0; i < tower.length; i++) {
+      var layer = tower[i];
+      drawIngredientShape(dragonX + layer.offsetX, layer.y, layer.type, 1);
+    }
+
+    if (shakeTimer > 0 && state === 'playing') {
+      ctx.restore();
+    }
+  }
+
+  function drawFallingIngredient() {
+    if (!currentIngredient || !currentIngredient.active) return;
+    var ing = currentIngredient;
+
+    drawIngredientShape(ing.x, ing.y, ing.type, 1);
+
+    var info = INGREDIENT_TYPES[ing.type];
+    ctx.fillStyle = '#fff';
+    ctx.font = '11px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText(info.name, ing.x, ing.y - RECT_H / 2 - 12);
+  }
+
+  function drawParticles() {
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      ctx.globalAlpha = p.life;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for (var j = 0; j < floatingTexts.length; j++) {
+      var ft = floatingTexts[j];
+      ctx.globalAlpha = ft.life;
+      ctx.fillStyle = ft.color;
+      ctx.font = 'bold 16px "Microsoft YaHei"';
+      ctx.textAlign = 'center';
+      ctx.fillText(ft.text, ft.x, ft.y);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawUI() {
+    var panelX = 10, panelY = 8, panelW = 240, panelH = 120;
+
+    // 面板背景 - 深色渐变
+    var panelGrad = ctx.createLinearGradient(panelX, panelY, panelX, panelY + panelH);
+    panelGrad.addColorStop(0, 'rgba(25,12,45,0.94)');
+    panelGrad.addColorStop(0.5, 'rgba(35,18,55,0.92)');
+    panelGrad.addColorStop(1, 'rgba(20,10,38,0.94)');
+    ctx.fillStyle = panelGrad;
+    ctx.beginPath();
+    ctx.roundRect(panelX, panelY, panelW, panelH, 12);
+    ctx.fill();
+
+    // 外发光边框
+    ctx.shadowColor = 'rgba(255,215,0,0.35)';
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 11);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // 内边框装饰
+    ctx.strokeStyle = 'rgba(255,165,0,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(panelX + 6, panelY + 6, panelW - 12, panelH - 12, 9);
+    ctx.stroke();
+
+    // 标题行背景
+    ctx.fillStyle = 'rgba(255,215,0,0.08)';
+    ctx.beginPath();
+    ctx.roundRect(panelX + 6, panelY + 5, panelW - 12, 26, [9, 9, 0, 0]);
+    ctx.fill();
+
+    // 分隔线
+    ctx.strokeStyle = 'rgba(255,215,0,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(panelX + 14, panelY + 35);
+    ctx.lineTo(panelX + panelW - 14, panelY + 35);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(panelX + 14, panelY + 60);
+    ctx.lineTo(panelX + panelW - 14, panelY + 60);
+    ctx.stroke();
+
+    // 第1行：得分
+    ctx.fillStyle = '#FFD700';
+    ctx.font = 'bold 16px "Microsoft YaHei"';
+    ctx.textAlign = 'left';
+    ctx.fillText('🏆 止战值', panelX + 14, panelY + 24);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 16px "Microsoft YaHei"';
+    ctx.textAlign = 'right';
+    var scoreStr = score.toString();
+    ctx.fillText(scoreStr, panelX + panelW - 14, panelY + 24);
+
+    // 第2行：动荡值（带可视化指示器）
+    var instabColor = instability >= 3 ? '#FF4444' : (instability >= 2 ? '#FFA500' : '#00FF88');
+    ctx.fillStyle = '#AAA';
+    ctx.font = 'bold 12px "Microsoft YaHei"';
+    ctx.textAlign = 'left';
+    ctx.fillText('⚡ 动荡值', panelX + 14, panelY + 49);
+
+    // 动荡值可视化条
+    var instBarX = panelX + panelW - 90, instBarY = panelY + 39, instBarW = 76, instBarH = 14;
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath();
+    ctx.roundRect(instBarX, instBarY, instBarW, instBarH, 7);
+    ctx.fill();
+
+    for (var i = 0; i < 3; i++) {
+      var segX = instBarX + 4 + i * 24;
+      var segW = 20;
+      ctx.fillStyle = i < instability ? instabColor : 'rgba(255,255,255,0.1)';
+      ctx.beginPath();
+      ctx.roundRect(segX, instBarY + 3, segW, instBarH - 6, 4);
+      ctx.fill();
+      // 选中段高光
+      if (i < instability) {
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.beginPath();
+        ctx.roundRect(segX, instBarY + 3, segW, (instBarH - 6) / 2, [4, 4, 0, 0]);
+        ctx.fill();
+      }
+    }
+
+    // 第3行：层数
+    ctx.fillStyle = '#AAA';
+    ctx.font = 'bold 12px "Microsoft YaHei"';
+    ctx.textAlign = 'left';
+    ctx.fillText('📊 层数', panelX + 14, panelY + 74);
+
+    var progress = totalLayers / maxLayers;
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px "Microsoft YaHei"';
+    ctx.textAlign = 'right';
+    ctx.fillText(totalLayers + ' / ' + maxLayers, panelX + panelW - 14, panelY + 74);
+
+    // 进度条
+    var progBarX = panelX + 14, progBarY = panelY + 83, progBarW = panelW - 28, progBarH = 8;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath();
+    ctx.roundRect(progBarX, progBarY, progBarW, progBarH, 4);
+    ctx.fill();
+    var progGrad = ctx.createLinearGradient(progBarX, progBarY, progBarX + progBarW, progBarY);
+    progGrad.addColorStop(0, '#FFD700');
+    progGrad.addColorStop(0.6, '#FF8C00');
+    progGrad.addColorStop(1, '#FF4444');
+    ctx.fillStyle = progGrad;
+    ctx.beginPath();
+    ctx.roundRect(progBarX, progBarY, progBarW * Math.min(1, progress), progBarH, 4);
+    ctx.fill();
+    // 进度条高光
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.beginPath();
+    ctx.roundRect(progBarX, progBarY, progBarW * Math.min(1, progress), progBarH / 2, [4, 4, 0, 0]);
+    ctx.fill();
+
+    // 倒计时（在面板底部用简洁方式展示）
+    var secs = Math.ceil(gameTimer);
+    var timerColor = gameTimer <= 10 ? '#FF4444' : '#FFD700';
+    ctx.fillStyle = timerColor;
+    ctx.font = 'bold 11px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    var timerPulse = gameTimer <= 10 ? 1 + Math.sin(Date.now() * 0.01) * 0.3 : 1;
+    ctx.globalAlpha = timerPulse;
+    ctx.fillText('💀 雷德王 ' + secs + 's 后降临', panelX + panelW / 2, panelY + panelH - 6);
+    ctx.globalAlpha = 1;
+
+    // 右侧：下一个物品预览（加长美化版）
+    var queueW = 175, queueH = 88, queueX = GAME_W - queueW - 12, queueY = 8;
+
+    // 面板背景 - 深色渐变
+    var queueGrad = ctx.createLinearGradient(queueX, queueY, queueX, queueY + queueH);
+    queueGrad.addColorStop(0, 'rgba(25,12,45,0.92)');
+    queueGrad.addColorStop(0.5, 'rgba(35,18,55,0.90)');
+    queueGrad.addColorStop(1, 'rgba(20,10,38,0.92)');
+    ctx.fillStyle = queueGrad;
+    ctx.beginPath();
+    ctx.roundRect(queueX, queueY, queueW, queueH, 12);
+    ctx.fill();
+
+    // 外发光边框
+    ctx.shadowColor = 'rgba(255,215,0,0.4)';
+    ctx.shadowBlur = 8;
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(queueX + 1, queueY + 1, queueW - 2, queueH - 2, 11);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // 内边框装饰
+    ctx.strokeStyle = 'rgba(255,165,0,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(queueX + 6, queueY + 6, queueW - 12, queueH - 12, 8);
+    ctx.stroke();
+
+    // 标题栏背景
+    var headerGrad = ctx.createLinearGradient(queueX, queueY, queueX, queueY + 30);
+    headerGrad.addColorStop(0, 'rgba(255,215,0,0.15)');
+    headerGrad.addColorStop(1, 'rgba(255,215,0,0.02)');
+    ctx.fillStyle = headerGrad;
+    ctx.beginPath();
+    ctx.roundRect(queueX + 6, queueY + 5, queueW - 12, 26, [8, 8, 0, 0]);
+    ctx.fill();
+
+    // 标题文字
+    ctx.fillStyle = '#FFD700';
+    ctx.font = 'bold 13px "Microsoft YaHei"';
+    ctx.textAlign = 'left';
+    ctx.fillText('📦 下一个食材', queueX + 14, queueY + 24);
+
+    // 标题下方分隔线
+    ctx.strokeStyle = 'rgba(255,215,0,0.25)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(queueX + 14, queueY + 33);
+    ctx.lineTo(queueX + queueW - 14, queueY + 33);
+    ctx.stroke();
+
+    // 收集要预览的物品（最多4个）
+    var previewItems = [];
+    if (currentIngredient && currentIngredient.active) {
+      previewItems.push(currentIngredient.type);
+    }
+    for (var q = 0; q < ingredientQueue.length && previewItems.length < 4; q++) {
+      previewItems.push(ingredientQueue[q]);
+    }
+    var previewCount = Math.min(4, previewItems.length);
+    var previewAreaY = queueY + 42;
+    var previewAreaH = queueH - 48;
+
+    // 每个预览物品的卡片槽
+    var cardW = 35, cardH = 38;
+    var cardGap = 6;
+    var totalCardsW = previewCount * cardW + (previewCount - 1) * cardGap;
+    var cardsStartX = queueX + (queueW - totalCardsW) / 2;
+
+    for (var p = 0; p < previewCount; p++) {
+      var cx = cardsStartX + p * (cardW + cardGap) + cardW / 2;
+      var cy = previewAreaY + previewAreaH / 2;
+
+      // 每个物品的小卡片背景
+      var cardGrad = ctx.createLinearGradient(cx - cardW/2, cy - cardH/2, cx - cardW/2, cy + cardH/2);
+      cardGrad.addColorStop(0, 'rgba(50,30,70,0.7)');
+      cardGrad.addColorStop(1, 'rgba(30,15,45,0.7)');
+      ctx.fillStyle = cardGrad;
+      ctx.beginPath();
+      ctx.roundRect(cx - cardW/2, cy - cardH/2, cardW, cardH, 6);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,215,0,0.3)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(cx - cardW/2, cy - cardH/2, cardW, cardH, 6);
+      ctx.stroke();
+
+      // 正在掉落中的物品高亮
+      if (p === 0 && currentIngredient && currentIngredient.active) {
+        var pulse = 0.5 + Math.sin(Date.now() * 0.005) * 0.3;
+        ctx.strokeStyle = 'rgba(255,215,0,' + pulse + ')';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.roundRect(cx - cardW/2 - 1, cy - cardH/2 - 1, cardW + 2, cardH + 2, 7);
+        ctx.stroke();
+      }
+
+      // 绘制食材图标
+      drawIngredientShape(cx, cy, previewItems[p], 0.35);
+
+      // 小标签显示序号
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.beginPath();
+      ctx.roundRect(cx + cardW/2 - 13, cy - cardH/2 - 1, 14, 12, [0, 3, 0, 3]);
+      ctx.fill();
+      ctx.fillStyle = '#FFD700';
+      ctx.font = 'bold 7px "Microsoft YaHei"';
+      ctx.textAlign = 'center';
+      ctx.fillText('#' + (p + 1), cx + cardW/2 - 6, cy - cardH/2 + 9);
+    }
+
+    // 没有物品时的占位提示
+    if (previewCount === 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.font = '11px "Microsoft YaHei"';
+      ctx.textAlign = 'center';
+      ctx.fillText('等待中...', queueX + queueW / 2, previewAreaY + previewAreaH / 2 + 4);
+    }
+  }
+
+  function drawLoadingScreen() {
+    ctx.fillStyle = '#1a0a2e';
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+    ctx.fillStyle = '#FFD700';
+    ctx.font = 'bold 28px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText('加载中...', GAME_W / 2, GAME_H / 2 - 20);
+
+    var barW = 200, barH = 16;
+    var barX = GAME_W / 2 - barW / 2, barY = GAME_H / 2 + 20;
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    ctx.roundRect(barX, barY, barW, barH, 8);
+    ctx.fill();
+    var progress = loadingTotal > 0 ? loadingProgress / loadingTotal : 0;
+    var progGrad = ctx.createLinearGradient(barX, barY, barX + barW, barY);
+    progGrad.addColorStop(0, '#FFD700');
+    progGrad.addColorStop(1, '#FF8C00');
+    ctx.fillStyle = progGrad;
+    ctx.beginPath();
+    ctx.roundRect(barX, barY, barW * progress, barH, 8);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px "Microsoft YaHei"';
+    ctx.fillText(loadingProgress + '/' + loadingTotal, GAME_W / 2, barY + barH + 20);
+  }
+
+  function drawReadyScreen() {
+    // 主菜单背景图（cover模式）
+    if (menuBgImg) {
+      var bgW = menuBgImg.naturalWidth;
+      var bgH = menuBgImg.naturalHeight;
+      var bgScale = Math.max(GAME_W / bgW, GAME_H / bgH);
+      var bgDW = bgW * bgScale;
+      var bgDH = bgH * bgScale;
+      ctx.drawImage(menuBgImg, (GAME_W - bgDW) / 2, (GAME_H - bgDH) / 2, bgDW, bgDH);
+    }
+    // 半透明遮罩保证内容可读性
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+
+    var now = Date.now() * 0.001;
+
+    // 绘制游戏标题图片
+    if (titleImg) {
+      var titleMaxW = 500;
+      var titleW = Math.min(titleImg.naturalWidth, titleMaxW);
+      var titleH = titleImg.naturalHeight * (titleW / titleImg.naturalWidth);
+      var titleX = GAME_W / 2 - titleW / 2;
+      var titleY = 60;
+      // 标题发光效果
+      ctx.shadowColor = '#FFD700';
+      ctx.shadowBlur = 25 + Math.sin(now * 2) * 10;
+      ctx.drawImage(titleImg, titleX, titleY, titleW, titleH);
+      ctx.shadowBlur = 0;
+    } else {
+      // 图片未加载时的文字备用标题
+      ctx.fillStyle = '#FFD700';
+      ctx.font = 'bold 36px "Microsoft YaHei"';
+      ctx.textAlign = 'center';
+      ctx.shadowColor = '#FF8C00';
+      ctx.shadowBlur = 15;
+      ctx.fillText('叠堡之怒', GAME_W / 2, 160);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#FF4444';
+      ctx.font = 'bold 28px "Microsoft YaHei"';
+      ctx.shadowColor = '#FF0000';
+      ctx.shadowBlur = 12;
+      ctx.fillText('雷德王覆灭记', GAME_W / 2, 200);
+      ctx.shadowBlur = 0;
+    }
+
+    // 绘制开始游戏按钮图片
+    if (startBtnImg) {
+      var btnW = Math.min(startBtnImg.naturalWidth, 240);
+      var btnH = startBtnImg.naturalHeight * (btnW / startBtnImg.naturalWidth);
+      var btnX = GAME_W / 2 - btnW / 2;
+      var btnY = 340;
+      startBtnRect = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+      // 按钮呼吸光晕
+      var glowAlpha = 0.4 + Math.sin(now * 2.5) * 0.3;
+      ctx.shadowColor = '#FFD700';
+      ctx.shadowBlur = 20 + Math.sin(now * 3) * 8;
+      ctx.drawImage(startBtnImg, btnX, btnY, btnW, btnH);
+      ctx.shadowBlur = 0;
+
+      // 金色边框呼吸效果
+      ctx.globalAlpha = glowAlpha;
+      ctx.strokeStyle = '#FFD700';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.roundRect(btnX - 4, btnY - 4, btnW + 8, btnH + 8, 14);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    } else {
+      // 图片未加载时的文字备用按钮
+      var fbX = GAME_W / 2 - 100, fbY = 350, fbW = 200, fbH = 50;
+      startBtnRect = { x: fbX, y: fbY, w: fbW, h: fbH };
+      var btnAlpha = 0.7 + Math.sin(now * 2.5) * 0.3;
+      ctx.fillStyle = 'rgba(255,140,0,' + btnAlpha + ')';
+      ctx.beginPath();
+      ctx.roundRect(fbX, fbY, fbW, fbH, 14);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 22px "Microsoft YaHei"';
+      ctx.textAlign = 'center';
+      ctx.fillText('开始游戏', GAME_W / 2, fbY + 33);
+    }
+
+    // 绘制操作说明按钮（使用 drawGameButton）
+    var tutW = 180;
+    var tutH = 44;
+    var tutX = GAME_W / 2 - tutW / 2;
+    var tutY = 430;
+    tutorialRect = { x: tutX, y: tutY, w: tutW, h: tutH };
+    drawGameButton(tutX, tutY, tutW, tutH, '📖', '操作说明', '#4A90D9');
+
+    // 底部提示
+    ctx.fillStyle = '#FFD700';
+    ctx.font = '12px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText('按任意键也可以开始', GAME_W / 2, 540);
+  }
+
+  let tutorialScrollY = 0;
+  let tutorialContentH = 0;
+  let tutorialTouchStartY = 0;
+  let tutorialTouchStartScroll = 0;
+
+  function drawTutorialScreen() {
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+
+    var now = Date.now() * 0.001;
+
+    // 关闭提示
+    ctx.fillStyle = '#FF6B6B';
+    ctx.font = '14px "Microsoft YaHei"';
+    ctx.textAlign = 'right';
+    ctx.fillText('✕ 点击任意位置关闭', GAME_W - 20, 30);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(20, 40, GAME_W - 40, GAME_H - 60);
+    ctx.clip();
+
+    var baseY = 60 - tutorialScrollY;
+    var lineH = 30;
+    var sectionGap = 20;
+    var col1 = '#FFD700';
+    var col2 = '#FFA500';
+    var col3 = '#87CEEB';
+    var col4 = '#98FB98';
+    var col5 = '#FF6B6B';
+    var col6 = '#DDA0DD';
+    var colWhite = '#FFFFFF';
+    var colCyan = '#00E5FF';
+    var colGreen = '#00FF88';
+
+    ctx.font = 'bold 22px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+
+    // 标题
+    ctx.fillStyle = col1;
+    ctx.fillText('🍔《叠堡之怒：雷德王覆灭记》操作指南', GAME_W / 2, baseY); baseY += 40;
+
+    // 🎯 游戏目标
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = col2;
+    ctx.fillText('🎯 游戏目标', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colWhite;
+    ctx.fillText('雷德王正突破大气层！', 40, baseY); baseY += lineH;
+    ctx.fillText('人类最后的希望，是奶龙和不断生长的汉堡塔。', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col3;
+    ctx.fillText('控制奶龙接住从天而降的食材，搭建汉堡、积蓄止战之力。', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col1;
+    ctx.fillText('当汉堡塔达到 36 层，且止战值 ≥ 1000 时，', 40, baseY); baseY += lineH;
+    ctx.fillText('奶龙觉醒力量，击退雷德王！', 40, baseY); baseY += sectionGap;
+
+    // 🕹️ 操作方式
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col2;
+    ctx.fillText('🕹️ 操作方式', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colWhite;
+    ctx.fillText('PC：鼠标左右移动 / A D / ← →', 40, baseY); baseY += lineH;
+    ctx.fillText('手机：手指左右拖动屏幕（奶龙跟随）', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col3;
+    ctx.fillText('💡 奶龙手中已举着汉堡底胚，直接开始堆叠。', 40, baseY); baseY += sectionGap;
+
+    // 🥬 食材一览
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col2;
+    ctx.fillText('🥬 食材一览（随机掉落）', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = col4;
+    ctx.fillText('🧀 芝士片 - 中       🥩 牛肉肉饼 - 高', 40, baseY); baseY += lineH;
+    ctx.fillText('🍍 菠萝 - 中         🍅 番茄片 - 中', 40, baseY); baseY += lineH;
+    ctx.fillText('🥬 生菜 - 低', 40, baseY); baseY += lineH;
+    ctx.fillText('🍞 汉堡顶 - 特殊（顶层）', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col3;
+    ctx.fillText('✅ 接住食材 → 加入汉堡塔 → 得分 + 计算完美系数', 40, baseY); baseY += sectionGap;
+
+    // ⭐ 完美系数
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col2;
+    ctx.fillText('⭐ 完美系数（0~100）', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colWhite;
+    ctx.fillText('越高越好，影响得分和汉堡稳定性。', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col1;
+    ctx.fillText('85~100  Perfect  不稳值 +0    得分倍率最高', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col4;
+    ctx.fillText('70~84   Good     不稳值 +0', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col5;
+    ctx.fillText('40~69   Shaky    不稳值 +1', 40, baseY); baseY += lineH;
+    ctx.fillStyle = '#FF4500';
+    ctx.fillText('0~39    Danger   不稳值 +3', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col3;
+    ctx.fillText('🎯 堆得高不如堆得准！', 40, baseY); baseY += sectionGap;
+
+    // ⚠️ 不稳值系统
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col5;
+    ctx.fillText('⚠️ 不稳值系统（核心失败机制）', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colWhite;
+    ctx.fillText('初始为 0，根据完美系数评级增加。', 40, baseY); baseY += lineH;
+    ctx.fillStyle = '#FF4500';
+    ctx.fillText('一旦 ≥ 3 → 汉堡倒塌，立即失败！', 40, baseY); baseY += lineH;
+    ctx.font = 'bold 15px "Microsoft YaHei"';
+    ctx.fillStyle = colGreen;
+    ctx.fillText('✨ 稳定连击（救命机制）', 40, baseY); baseY += lineH;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colWhite;
+    ctx.fillText('连续 3 次获得 Good 或 Perfect →', 40, baseY); baseY += lineH;
+    ctx.fillText('不稳值直接清零 → 触发金光特效 + 提示动画', 40, baseY); baseY += sectionGap;
+
+    // 🚨 失败条件
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col5;
+    ctx.fillText('🚨 失败条件（任意一条即失败）', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colWhite;
+    ctx.fillText('1. 汉堡倒塌：不稳值 ≥ 3', 40, baseY); baseY += lineH;
+    ctx.fillText('2. 食材落地：任何食材掉在地上未被接住', 40, baseY); baseY += lineH;
+    ctx.fillText('3. 止战值不足：汉堡达 36 层但止战值 < 1000', 40, baseY); baseY += sectionGap;
+
+    // 🏆 胜利条件
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col1;
+    ctx.fillText('🏆 胜利条件（必须同时满足）', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = col4;
+    ctx.fillText('✅ 汉堡塔达到 36 层', 40, baseY); baseY += lineH;
+    ctx.fillText('✅ 止战值 ≥ 1000', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col3;
+    ctx.fillText('🎉 胜利动画：汉堡塔完成 → 奶龙觉醒 →', 40, baseY); baseY += lineH;
+    ctx.fillText('止战之力释放 → 雷德王被击退 → 和平恢复', 40, baseY); baseY += sectionGap;
+
+    // 📊 游戏界面
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col2;
+    ctx.fillText('📊 游戏界面（顶部实时显示）', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colWhite;
+    ctx.fillText('当前层数 / 止战值 / 完美系数 / 动荡值 / 倒计时', 40, baseY); baseY += sectionGap;
+
+    // 💡 通关技巧
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col6;
+    ctx.fillText('💡 通关技巧', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colWhite;
+    ctx.fillText('1. 优先瞄准中心：偏移越小，完美系数越高', 40, baseY); baseY += lineH;
+    ctx.fillText('2. 牛肉肉饼基础分最高 → 快速提升止战值', 40, baseY); baseY += lineH;
+    ctx.fillText('3. 避免连续 shaky/danger：不稳值到 3 直接崩盘', 40, baseY); baseY += lineH;
+    ctx.fillText('4. 利用稳定连击：连续 3 次 Good+ 可清空不稳值', 40, baseY); baseY += lineH;
+    ctx.fillText('5. 目标不止 36 层：止战值必须 ≥1000，否则白堆', 40, baseY); baseY += sectionGap;
+
+    // 📌 一句话总结
+    ctx.font = 'bold 17px "Microsoft YaHei"';
+    ctx.fillStyle = col1;
+    ctx.fillText('📌 一句话总结', 40, baseY); baseY += 32;
+    ctx.font = '15px "Microsoft YaHei"';
+    ctx.fillStyle = colCyan;
+    ctx.fillText('控制奶龙精准接住每一片食材，让每层尽量与上一层中心重合；', 40, baseY); baseY += lineH;
+    ctx.fillText('连续精准可消除不稳值，不稳值≥3、食材落地或总分不足都会失败；', 40, baseY); baseY += lineH;
+    ctx.fillStyle = col1;
+    ctx.font = 'bold 16px "Microsoft YaHei"';
+    ctx.fillText('达到 36 层 + 总分≥1000 即可拯救地球！ 🌍✨', 40, baseY); baseY += 48;
+
+    tutorialContentH = baseY + tutorialScrollY;
+
+    ctx.restore();
+
+    // 滚动提示
+    if (tutorialContentH > GAME_H - 60) {
+      var scrollAlpha = 0.3 + Math.sin(now * 3) * 0.2;
+      ctx.globalAlpha = scrollAlpha;
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px "Microsoft YaHei"';
+      ctx.textAlign = 'center';
+      ctx.fillText('⬆⬇ 滚动查看', GAME_W / 2, GAME_H - 15);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawLoseScreen() {
+    // 半透明遮罩
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+
+    // 绘制失败图片
+    if (loseImg) {
+      var loseMaxW = 500;
+      var loseW = Math.min(loseImg.naturalWidth, loseMaxW);
+      var loseH = loseImg.naturalHeight * (loseW / loseImg.naturalWidth);
+      var loseX = GAME_W / 2 - loseW / 2;
+      var loseY = 60;
+      ctx.drawImage(loseImg, loseX, loseY, loseW, loseH);
+    } else {
+      ctx.fillStyle = '#FF4444';
+      ctx.font = 'bold 40px "Microsoft YaHei"';
+      ctx.textAlign = 'center';
+      ctx.fillText('失败！', GAME_W / 2, 180);
+    }
+
+    // 失败原因 + 止战值
+    ctx.fillStyle = '#FFD700';
+    ctx.font = 'bold 28px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText('止战值: ' + score, GAME_W / 2, 290);
+
+    ctx.fillStyle = '#FF6666';
+    ctx.font = 'bold 18px "Microsoft YaHei"';
+    if (loseReason === 'ground') {
+      ctx.fillText('叠堡失败，无法获得止战之力', GAME_W / 2, 325);
+    } else if (loseReason === 'instability') {
+      ctx.fillText('汉堡塔不稳倒塌，无法获得止战之力', GAME_W / 2, 325);
+    } else {
+      ctx.fillText('止战值不足1000，无法获得止战之力', GAME_W / 2, 325);
+    }
+
+    // 绘制两个按钮
+    var btnW = 130;
+    var btnH = 46;
+    var gap = 40;
+    var totalW = btnW * 2 + gap;
+    var btnStartX = GAME_W / 2 - totalW / 2;
+    var btnY = 355;
+
+    // 重新挑战按钮
+    var retryX = btnStartX;
+    loseRetryRect = { x: retryX, y: btnY, w: btnW, h: btnH };
+    drawGameButton(retryX, btnY, btnW, btnH, '🔄', '重新挑战', '#FF8C00');
+
+    // 返回主页按钮
+    var homeX = btnStartX + btnW + gap;
+    loseHomeRect = { x: homeX, y: btnY, w: btnW, h: btnH };
+    drawGameButton(homeX, btnY, btnW, btnH, '🏠', '返回主页', '#555');
+  }
+
+  function drawWinScreen() {
+    // 渐入遮罩
+    ctx.fillStyle = 'rgba(0,0,0,' + Math.min(0.6, winAnimTimer * 0.5) + ')';
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+
+    // 绘制胜利图片
+    if (winImg) {
+      var winMaxW = 500;
+      var winW = Math.min(winImg.naturalWidth, winMaxW);
+      var winH = winImg.naturalHeight * (winW / winImg.naturalWidth);
+      var winX = GAME_W / 2 - winW / 2;
+      var winY = 60;
+      var bounce = Math.sin(winAnimTimer * 2) * 5;
+      ctx.drawImage(winImg, winX, winY + bounce, winW, winH);
+    } else {
+      var bounce2 = Math.sin(winAnimTimer * 2) * 5;
+      ctx.fillStyle = '#FFD700';
+      ctx.font = 'bold 42px "Microsoft YaHei"';
+      ctx.textAlign = 'center';
+      ctx.fillText('和平恢复！', GAME_W / 2, 150 + bounce2);
+    }
+
+    // 得分信息
+    ctx.fillStyle = '#fff';
+    ctx.font = '18px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText('止战值: ' + score, GAME_W / 2, 300);
+
+    // 绘制按钮（延迟显示）
+    if (winAnimTimer > 1.5) {
+      var btnW = 130;
+      var btnH = 46;
+      var gap = 40;
+      var totalW = btnW * 2 + gap;
+      var btnStartX = GAME_W / 2 - totalW / 2;
+      var btnY = 370;
+
+      // 重新挑战按钮
+      var retryX = btnStartX;
+      winRetryRect = { x: retryX, y: btnY, w: btnW, h: btnH };
+      drawGameButton(retryX, btnY, btnW, btnH, '🔄', '重新挑战', '#FF8C00');
+
+      // 返回主页按钮
+      var homeX = btnStartX + btnW + gap;
+      winHomeRect = { x: homeX, y: btnY, w: btnW, h: btnH };
+      drawGameButton(homeX, btnY, btnW, btnH, '🏠', '返回主页', '#555');
+    }
+  }
+
+  function drawGameButton(x, y, w, h, icon, label, color) {
+    // 阴影
+    ctx.shadowColor = 'rgba(0,0,0,0.4)';
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetY = 3;
+
+    // 按钮主体 - 渐变填充
+    var grad = ctx.createLinearGradient(x, y, x, y + h);
+    if (color === '#555') {
+      grad.addColorStop(0, '#777');
+      grad.addColorStop(0.5, '#555');
+      grad.addColorStop(1, '#333');
+    } else if (color === '#4A90D9') {
+      grad.addColorStop(0, '#6BB5FF');
+      grad.addColorStop(0.5, '#4A90D9');
+      grad.addColorStop(1, '#2D6FA8');
+    } else {
+      grad.addColorStop(0, '#FFB347');
+      grad.addColorStop(0.5, '#FF8C00');
+      grad.addColorStop(1, '#CC6A00');
+    }
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 12);
+    ctx.fill();
+
+    // 高光边框
+    ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(x + 1, y + 1, w - 2, h - 2, 11);
+    ctx.stroke();
+
+    // 图标
+    ctx.font = '20px "Segoe UI Emoji", "Apple Color Emoji", "Microsoft YaHei"';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(icon, x + 12, y + h / 2);
+
+    // 文字
+    ctx.font = 'bold 16px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, x + w / 2 + 8, y + h / 2 + 1);
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, GAME_W, GAME_H);
+
+    drawBackground();
+
+    ctx.save();
+    ctx.translate(0, cameraY);
+
+    drawDragon();
+    drawTower();
+    drawFallingIngredient();
+    drawParticles();
+
+    ctx.restore();
+
+    drawUI();
+
+    if (state === 'loading') drawLoadingScreen();
+    if (state === 'ready') drawReadyScreen();
+    if (state === 'tutorial') drawTutorialScreen();
+    if (state === 'lose') drawLoseScreen();
+    if (state === 'win') drawWinScreen();
+  }
+
+  function gameLoop(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    var dt = Math.min(0.05, (timestamp - lastTime) / 1000);
+    lastTime = timestamp;
+
+    update(dt);
+    render();
+    animFrameId = requestAnimationFrame(gameLoop);
+  }
+
+  function initAudio() {
+    if (!startSfx) {
+      startSfx = new Audio('Humburger(2).mp3');
+      startSfx.load();
+    }
+    if (!monsterSound) {
+      monsterSound = new Audio('怪物叫声(2).mp3');
+      monsterSound.load();
+    }
+    if (!bgm) {
+      bgm = new Audio('bgm(3).mp3');
+      bgm.loop = true;
+      bgm.volume = 0.5;
+      bgm.load();
+    }
+    if (!laughSfx) {
+      laughSfx = new Audio('奶龙笑声(1).mp3');
+      laughSfx.load();
+    }
+    if (!crySfx) {
+      crySfx = new Audio('奶龙大哭.mp3');
+      crySfx.load();
+    }
+    if (!catchSfx) {
+      catchSfx = new Audio('掉落音效(1).mp3');
+      catchSfx.load();
+    }
+    if (!menuBgm) {
+      menuBgm = new Audio('主菜单bgm.mp3');
+      menuBgm.loop = true;
+      menuBgm.volume = 0.5;
+      menuBgm.load();
+    }
+    if (audioCtx) return;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioEnabled = true;
+    } catch(e) {
+      audioEnabled = false;
+    }
+  }
+
+  function playSound(type) {
+    // 已由MP3音效替代，原合成音效禁用
+  }
+
+  function goHome() {
+    // 停止游戏BGM，切换为主菜单BGM
+    if (bgm) { bgm.pause(); bgm.currentTime = 0; }
+    if (menuBgm) { menuBgm.currentTime = 0; menuBgm.play().catch(function() {}); }
+    state = 'ready';
+    score = 0;
+    instability = 0;
+    consecutiveGood = 0;
+    dragonX = GAME_W / 2;
+    targetDragonX = GAME_W / 2;
+    keyHoldTime = 0;
+    currentKeyDir = 0;
+    tower = [];
+    particles = [];
+    floatingTexts = [];
+    shakeTimer = 0;
+    shakeIntensity = 0;
+    currentIngredient = null;
+    dragonGlow = 0;
+    winAnimTimer = 0;
+    cameraY = 0;
+    bgScrollY = 0;
+    gameTimer = GAME_DURATION;
+    spawnCooldown = 0;
+    topBunSpawned = false;
+    totalLayers = 0;
+    maxLayers = 0;
+    ingredientQueue = [];
+    lastTime = 0;
+    resetResultRects();
+  }
+
+  function resetResultRects() {
+    loseRetryRect = { x: 0, y: 0, w: 0, h: 0 };
+    loseHomeRect = { x: 0, y: 0, w: 0, h: 0 };
+    winRetryRect = { x: 0, y: 0, w: 0, h: 0 };
+    winHomeRect = { x: 0, y: 0, w: 0, h: 0 };
+  }
+
+  function restartGame() {
+    initAudio();
+    // 停止主菜单BGM，播放游戏BGM
+    if (menuBgm) { menuBgm.pause(); menuBgm.currentTime = 0; }
+    if (bgm) { bgm.currentTime = 0; bgm.play().catch(function() {}); }
+    initGame();
+    lastTime = 0;
+    resetResultRects();
+  }
+
+  function startGame() {
+    initAudio();
+    // 停止主菜单BGM
+    if (menuBgm) { menuBgm.pause(); menuBgm.currentTime = 0; }
+    // 播放开始游戏音效
+    if (startSfx) {
+      startSfx.currentTime = 0;
+      startSfx.play().catch(function() {});
+    }
+    // 播放游戏BGM
+    if (bgm) { bgm.currentTime = 0; bgm.play().catch(function() {}); }
+    initGame();
+    lastTime = 0;
+  }
+
+  function resizeCanvas() {
+    var container = document.getElementById('game-container');
+    var cw = container.clientWidth;
+    var ch = container.clientHeight;
+    var scale = Math.min(cw / GAME_W, ch / GAME_H);
+    canvas.style.width = (GAME_W * scale) + 'px';
+    canvas.style.height = (GAME_H * scale) + 'px';
+    canvas.width = GAME_W;
+    canvas.height = GAME_H;
+  }
+
+  canvas.addEventListener('mousemove', function(e) {
+    if (state !== 'playing') return;
+    mouseActive = true;
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = GAME_W / rect.width;
+    mouseX = (e.clientX - rect.left) * scaleX;
+    mouseX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, mouseX));
+  });
+
+  canvas.addEventListener('wheel', function(e) {
+    if (state === 'tutorial') {
+      e.preventDefault();
+      tutorialScrollY = Math.max(0, Math.min(tutorialContentH - GAME_H + 60, tutorialScrollY + e.deltaY));
+    }
+  });
+
+  canvas.addEventListener('mousedown', function(e) {
+    initAudio();
+    // 首次交互解锁音频并播放主菜单BGM
+    if (state === 'ready' && menuBgm && menuBgm.paused) {
+      menuBgm.play().catch(function() {});
+    }
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = GAME_W / rect.width;
+    var scaleY = GAME_H / rect.height;
+    var mx = (e.clientX - rect.left) * scaleX;
+    var my = (e.clientY - rect.top) * scaleY;
+
+    if (state === 'ready') {
+      if (mx >= startBtnRect.x && mx <= startBtnRect.x + startBtnRect.w &&
+          my >= startBtnRect.y && my <= startBtnRect.y + startBtnRect.h) {
+        startGame();
+      } else if (mx >= tutorialRect.x && mx <= tutorialRect.x + tutorialRect.w &&
+          my >= tutorialRect.y && my <= tutorialRect.y + tutorialRect.h) {
+        state = 'tutorial';
+        tutorialScrollY = 0;
+      }
+      return;
+    }
+
+    if (state === 'tutorial') {
+      state = 'ready';
+      return;
+    }
+
+    if (state === 'lose') {
+      // 点击重新挑战
+      if (mx >= loseRetryRect.x && mx <= loseRetryRect.x + loseRetryRect.w &&
+          my >= loseRetryRect.y && my <= loseRetryRect.y + loseRetryRect.h) {
+        restartGame();
+        return;
+      }
+      // 点击返回主页
+      if (mx >= loseHomeRect.x && mx <= loseHomeRect.x + loseHomeRect.w &&
+          my >= loseHomeRect.y && my <= loseHomeRect.y + loseHomeRect.h) {
+        goHome();
+        return;
+      }
+      return;
+    }
+
+    if (state === 'win' && winAnimTimer > 1.5) {
+      // 点击重新挑战
+      if (mx >= winRetryRect.x && mx <= winRetryRect.x + winRetryRect.w &&
+          my >= winRetryRect.y && my <= winRetryRect.y + winRetryRect.h) {
+        restartGame();
+        return;
+      }
+      // 点击返回主页
+      if (mx >= winHomeRect.x && mx <= winHomeRect.x + winHomeRect.w &&
+          my >= winHomeRect.y && my <= winHomeRect.y + winHomeRect.h) {
+        goHome();
+        return;
+      }
+      return;
+    }
+  });
+
+  canvas.addEventListener('mouseleave', function() {
+    mouseActive = false;
+  });
+
+  canvas.addEventListener('touchstart', function(e) {
+    e.preventDefault();
+    initAudio();
+    // 首次交互解锁音频并播放主菜单BGM
+    if (state === 'ready' && menuBgm && menuBgm.paused) {
+      menuBgm.play().catch(function() {});
+    }
+    var touch = e.touches[0];
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = GAME_W / rect.width;
+    var scaleY = GAME_H / rect.height;
+
+    if (state === 'ready') {
+      if (touch) {
+        var mx = (touch.clientX - rect.left) * scaleX;
+        var my = (touch.clientY - rect.top) * scaleY;
+        if (mx >= startBtnRect.x && mx <= startBtnRect.x + startBtnRect.w &&
+            my >= startBtnRect.y && my <= startBtnRect.y + startBtnRect.h) {
+          startGame();
+        } else if (mx >= tutorialRect.x && mx <= tutorialRect.x + tutorialRect.w &&
+            my >= tutorialRect.y && my <= tutorialRect.y + tutorialRect.h) {
+          state = 'tutorial';
+          tutorialScrollY = 0;
+        }
+      }
+      return;
+    }
+
+    if (state === 'tutorial') {
+      state = 'ready';
+      return;
+    }
+
+    if (state === 'lose') {
+      if (touch) {
+        var mx2 = (touch.clientX - rect.left) * scaleX;
+        var my2 = (touch.clientY - rect.top) * scaleY;
+        if (mx2 >= loseRetryRect.x && mx2 <= loseRetryRect.x + loseRetryRect.w &&
+            my2 >= loseRetryRect.y && my2 <= loseRetryRect.y + loseRetryRect.h) {
+          restartGame(); return;
+        }
+        if (mx2 >= loseHomeRect.x && mx2 <= loseHomeRect.x + loseHomeRect.w &&
+            my2 >= loseHomeRect.y && my2 <= loseHomeRect.y + loseHomeRect.h) {
+          goHome(); return;
+        }
+      }
+      return;
+    }
+
+    if (state === 'win' && winAnimTimer > 1.5) {
+      if (touch) {
+        var mx3 = (touch.clientX - rect.left) * scaleX;
+        var my3 = (touch.clientY - rect.top) * scaleY;
+        if (mx3 >= winRetryRect.x && mx3 <= winRetryRect.x + winRetryRect.w &&
+            my3 >= winRetryRect.y && my3 <= winRetryRect.y + winRetryRect.h) {
+          restartGame(); return;
+        }
+        if (mx3 >= winHomeRect.x && mx3 <= winHomeRect.x + winHomeRect.w &&
+            my3 >= winHomeRect.y && my3 <= winHomeRect.y + winHomeRect.h) {
+          goHome(); return;
+        }
+      }
+      return;
+    }
+
+    if (state === 'tutorial' && touch) {
+      tutorialTouchStartY = touch.clientY;
+      tutorialTouchStartScroll = tutorialScrollY;
+      return;
+    }
+
+    if (touch && state === 'playing') {
+      mouseActive = true;
+      mouseX = (touch.clientX - rect.left) * scaleX;
+      mouseX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, mouseX));
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', function(e) {
+    e.preventDefault();
+    var touch = e.touches[0];
+    if (state === 'tutorial' && touch) {
+      var deltaY = tutorialTouchStartY - touch.clientY;
+      tutorialScrollY = Math.max(0, Math.min(tutorialContentH - GAME_H + 60, tutorialTouchStartScroll + deltaY));
+      return;
+    }
+    if (touch && state === 'playing') {
+      mouseActive = true;
+      var rect = canvas.getBoundingClientRect();
+      var scaleX = GAME_W / rect.width;
+      mouseX = (touch.clientX - rect.left) * scaleX;
+      mouseX = Math.max(RECT_W / 2, Math.min(GAME_W - RECT_W / 2, mouseX));
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', function(e) {
+    e.preventDefault();
+    mouseActive = false;
+  });
+
+  document.addEventListener('keydown', function(e) {
+    initAudio();
+    // 首次交互解锁音频并播放主菜单BGM
+    if (state === 'ready' && menuBgm && menuBgm.paused) {
+      menuBgm.play().catch(function() {});
+    }
+    keysDown[e.code] = true;
+    if (state === 'tutorial') {
+      state = 'ready';
+      return;
+    }
+    if (state === 'ready') startGame();
+    if (e.code === 'KeyR') {
+      if (state === 'lose') restartGame();
+      if (state === 'win' && winAnimTimer > 1.5) restartGame();
+    }
+    if (e.code === 'KeyA' || e.code === 'ArrowLeft' || e.code === 'KeyD' || e.code === 'ArrowRight') {
+      mouseActive = false;
+    }
+  });
+
+  document.addEventListener('keyup', function(e) {
+    keysDown[e.code] = false;
+    if (e.code === 'KeyA' || e.code === 'ArrowLeft' || e.code === 'KeyD' || e.code === 'ArrowRight') {
+      keyHoldTime = 0;
+      currentKeyDir = 0;
+    }
+  });
+
+  window.addEventListener('resize', resizeCanvas);
+
+  resizeCanvas();
+  canvas.width = GAME_W;
+  canvas.height = GAME_H;
+  animFrameId = requestAnimationFrame(gameLoop);
+
+  } catch (err) {
+    if (animFrameId) cancelAnimationFrame(animFrameId);
+    var overlay = document.getElementById('error-overlay');
+    var detail = document.getElementById('err-detail');
+    if (overlay && detail) {
+      detail.textContent = '错误详情: ' + (err.message || '未知错误');
+      overlay.style.display = 'flex';
+    }
+  }
+
+})();
+</script>
+</body>
+</html>
